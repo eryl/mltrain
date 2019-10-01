@@ -14,6 +14,6 @@ setup(name='mltrain',
       author_email='erik.ylipaa@ri.se',
       license='MIT',
       packages=['mltrain'],
-      install_requires=[],
+      install_requires=['tqdm'],
       dependency_links=[],
       zip_safe=False)
