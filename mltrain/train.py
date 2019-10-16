@@ -71,10 +71,20 @@ def worker(*, experiment_function, device='cpu', backend='theano', **kwargs):
     experiment_function(metadata=metadata, backend=backend, **kwargs)
 
 
-
 def make_timestamp():
     dt = datetime.datetime.now()
     return dt.strftime("%Y-%m-%dT%H.%M.%S")  # We choose this format to make the filename compatible with windows environmnets
+
+
+def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
+    if hyper_parameters is not None:
+        for hp in hyper_parameters:
+            model = model_factory(hyper_parameters)
+            train(model=model, **kwargs)
+
+
+def hyper_parameter_train(*args, hyper_parameters, **kwargs):
+    train(**kwargs)
 
 
 def train(*,
@@ -87,7 +97,7 @@ def train(*,
           keep_snapshots=False,
           eval_time=None,
           eval_iterations=None,
-          eval_epochs=None,
+          eval_epochs=1,
           checkpoint_suffix='.pkl',
           model_format_string=None,
           do_pre_eval=False,
@@ -114,7 +124,7 @@ def train(*,
         print('\n'.join(list(sorted('{}: {}'.format(k,v) for k,v in model_metadata.items()))))
     except AttributeError:
         print("Couldn't get model parameters, skipping model_params for the metadata")
-        raise
+      
 
     training_params = dict(eval_time=eval_time,
                            eval_iterations=eval_iterations,
@@ -130,19 +140,20 @@ def train(*,
 
     evaluation_metrics, best_metrics = setup_metrics(evaluation_metrics)
     with Monitor(output_dir / 'logs') as monitor:
-        training_loop(model,
-                      training_dataset,
-                      evaluation_dataset,
-                      max_epochs,
-                      monitor,
-                      evaluation_metrics,
-                      best_metrics,
-                      model_format_string,
-                      eval_time=eval_time,
-                      eval_iterations=eval_iterations,
-                      eval_epochs=eval_epochs,
-                      do_pre_eval=do_pre_eval,
-                      keep_snapshots=keep_snapshots)
+        best_model_path = training_loop(model,
+                                        training_dataset,
+                                        evaluation_dataset,
+                                        max_epochs,
+                                        monitor,
+                                        evaluation_metrics,
+                                        best_metrics,
+                                        model_format_string,
+                                        eval_time=eval_time,
+                                        eval_iterations=eval_iterations,
+                                        eval_epochs=eval_epochs,
+                                        do_pre_eval=do_pre_eval,
+                                        keep_snapshots=keep_snapshots)
+        return best_model_path
 
 
 def setup_metrics(evaluation_metrics):
@@ -185,8 +196,10 @@ def training_loop(model,
                   keep_snapshots=False):
 
     epoch = 0
+    best_model_path = None
+
     def sigint_handler(signal, frame):
-        checkpoint(model, model_checkpoint_format, np.nan, [], is_best=False, remove_models=False)
+        checkpoint(model, model_checkpoint_format, np.nan, {}, is_best=False, remove_models=False)
         sys.exit(0)
     signal.signal(signal.SIGINT, sigint_handler)
 
@@ -203,7 +216,7 @@ def training_loop(model,
     eval_iteration = 0
 
     if do_pre_eval:
-        best_metrics = evaluate_model(best_metrics=best_metrics, epoch=0, **eval_kwargs)
+        best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=0, **eval_kwargs)
 
     for epoch in trange(max_epochs, desc='Epochs'):
         ## This is the main training loop
@@ -219,7 +232,7 @@ def training_loop(model,
 
             if ((eval_time is not None and eval_time > 0 and eval_time_dt >= eval_time) or
                 (eval_iterations is not None and eval_iterations > 0 and eval_iteration >= eval_iterations)):
-                best_metrics = evaluate_model(best_metrics=best_metrics, epoch=epoch_fraction, **eval_kwargs)
+                best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch_fraction, **eval_kwargs)
                 eval_timestamp = time.time()
                 eval_iteration = 0
 
@@ -228,12 +241,13 @@ def training_loop(model,
 
         eval_epoch += 1
         if (eval_epochs is not None and eval_epochs > 0 and eval_epoch >= eval_epochs):
-            best_metrics = evaluate_model(best_metrics=best_metrics, epoch=epoch + 1, **eval_kwargs)
+            best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch + 1, **eval_kwargs)
             eval_epoch = 0
         # End of epoch
 
     # Done with the whole training loop
-    best_metrics = evaluate_model(best_metrics=best_metrics, epoch=epoch, **eval_kwargs)
+    best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch, **eval_kwargs)
+    return best_model_path
 
 
 def evaluate_model(*,
@@ -257,24 +271,27 @@ def evaluate_model(*,
             except TypeError:
                 print("Not logging result {}, can't aggregate data type".format(k))
 
-    printout_metrics = []
+    printout_metrics = {}
     # For the model to be the new best, it should be at least as good as the old model on all evaluation metrics
     # The problem is how to compare metrics, e.g. lower loss is better while higher accuracy is better
     comparisons = []
     for evaluation_metric, comparator in evaluation_metrics:
-        printout_metrics.append((evaluation_metric, evaluation_results[evaluation_metric]))
-        new_value = evaluation_results[evaluation_metric]
-        previous_best = best_metrics[evaluation_metric]
-        comparisons.append(comparator(new_value, previous_best))
+        # We prune the evaluation metrics to only include those which have matching values in the evaluation results
+        for evaluation_result_key, evaluation_result_mean in evaluation_results.items():
+            if evaluation_metric in evaluation_result_key:
+                printout_metrics[evaluation_metric] = evaluation_result_mean
+                previous_best = best_metrics[evaluation_metric]
+                comparisons.append(comparator(evaluation_result_mean, previous_best))
 
     is_best = np.all(comparisons)
     if monitor is not None:
-        monitor.log_now({'evaluation ' + k: v for k,v in evaluation_results.items()})
+        monitor.log_now({k: v for k,v in evaluation_results.items()})
 
-    checkpoint(model, model_checkpoint_format, epoch, printout_metrics, is_best, remove_models=not keep_snapshots)
+    best_model_path = checkpoint(model, model_checkpoint_format, epoch,
+                                 printout_metrics, is_best, remove_models=not keep_snapshots)
     if is_best:
         best_metrics = printout_metrics
-    return best_metrics
+    return best_metrics, best_model_path
 
 
 def setup_directory(output_dir: Path):
@@ -295,7 +312,7 @@ def checkpoint(model,
                is_best, latest_model_name='latest_model', best_model_name='best_model',
                remove_models=True):
     model_directory = checkpoint_format.parent
-    metrics_string = '_'.join(['{}:{:.03f}'.format(k,v) for k,v in metrics])
+    metrics_string = '_'.join(['{}:{:.03f}'.format(k,v) for k,v in metrics.items()])
     model_name = checkpoint_format.name.format(epoch=epoch, metrics=metrics_string)
     checkpoint_path = checkpoint_format.with_name(model_name)
     model_directory.mkdir(exist_ok=True)
@@ -327,6 +344,8 @@ def checkpoint(model,
             if best_model_symlink.is_symlink():
                 best_model_symlink.unlink()
         best_model_symlink.symlink_to(checkpoint_path)
+
+    return best_model_symlink.resolve()
 
 
 class Monitor(object):
@@ -416,7 +435,7 @@ class MonitorProcess(multiprocessing.Process):
             self.flush_cache(channel_name)
 
     def flush_cache(self, channel_name):
-        print("Flushing cache for channel {}".format(channel_name))
+        #print("Flushing cache for channel {}".format(channel_name))
         if len(self.channels[channel_name]) > 0:
             if channel_name not in self.channel_files:
                 channel_file_name = os.path.join(self.store_directory, channel_name + '.txt')
@@ -432,18 +451,19 @@ class MonitorProcess(multiprocessing.Process):
             channel_file.write(data)
             channel_file.flush()
             self.channels[channel_name].clear()
-        print("Done flushing cache")
+        #print("Done flushing cache")
 
     def close(self):
         for channel_name, channel_file in self.channel_files.items():
             channel_file.close()
 
 
-def add_training_arguments(parser):
+def add_parser_args(parser):
     """ Add common command line arguments used by the training function.
     """
     parser.add_argument('--output-dir',
-                        help=("Directory to write output to."))
+                        help=("Directory to write output to."),
+                        type=Path)
     parser.add_argument('--max-epochs', help="Maximum number of epochs to train for.", type=int, default=100)
     parser.add_argument('--eval-time', help="How often to run the model on the validation set in seconds.", type=float)
     parser.add_argument('--eval-epochs', help="How often to run the model on the validation set in epochs. 1 means at the end of every epoch.", type=int)
