@@ -82,9 +82,61 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
             model = model_factory(hyper_parameters)
             train(model=model, **kwargs)
 
+class HyperParameter(object):
+    ...
 
-def hyper_parameter_train(*args, hyper_parameters, **kwargs):
-    train(**kwargs)
+class HyperParameterManager(object):
+    def __init__(self, base_model, base_args, base_kwargs, search_method='random', search_iterations=None):
+        self.base_model = base_model
+        self.base_args = base_args
+        self.base_kwargs = base_kwargs
+        self.search_method = search_method
+        self.search_iterations = search_iterations
+        self.n_iter = 0
+        if self.search_iterations is None and self.search_method == 'random':
+            raise ValueError('If search method is random, you have to specify number of iterations')
+        self.setup_search_space()
+
+    def setup_search_space(self):
+        self.search_space = []
+        for i, arg in enumerate(self.base_args):
+            if isinstance(arg, HyperParameter):
+                self.search_space.append((arg, 'args', i))
+        for k, v in self.base_kwargs.items():
+            if isinstance(v, HyperParameter):
+                self.search_space.append((v, 'kwargs', k))
+
+    def get_model(self):
+        if self.search_method == 'random':
+            if self.n_iter >= self.search_iterations:
+                raise StopIteration()
+
+            args = list(self.base_args)
+            kwargs = dict(self.base_kwargs.items())
+            for hp, arg_type, arg_pos in self.search_space:
+                # Here we might define other methods of sampling from the search space, for now we just do it randomly
+                ...
+
+
+    def report(self, hp_id, performance):
+        pass
+
+
+
+
+def hyper_parameter_train(*, base_model, base_args, base_kwargs, search_method='random',
+                          search_iterations=None, **train_kwargs):
+    # Figure out what args are Hyper Parameter configurations
+    hp_manager = HyperParameterManager(base_model, base_args, base_kwargs,
+                                       search_method=search_method, search_iterations=search_iterations)
+    best_model_path = None
+    try:
+        while True:
+            hp_id, model = hp_manager.get_model()
+            performance, best_model_path = train(model=model, **train_kwargs)
+            hp_manager.report(hp_id, performance)
+    except StopIteration:
+        return best_model_path
 
 
 def train(*,
