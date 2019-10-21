@@ -82,8 +82,22 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
             model = model_factory(hyper_parameters)
             train(model=model, **kwargs)
 
+
 class HyperParameter(object):
+    def random_sample(self):
+        ...
+
+class DiscreteHyperParameter(HyperParameter):
     ...
+
+
+class LinearHyperParameter(HyperParameter):
+    ...
+
+
+class LogLinearHyperParameter(LinearHyperParameter):
+    ...
+
 
 class HyperParameterManager(object):
     def __init__(self, base_model, base_args, base_kwargs, search_method='random', search_iterations=None):
@@ -92,13 +106,14 @@ class HyperParameterManager(object):
         self.base_kwargs = base_kwargs
         self.search_method = search_method
         self.search_iterations = search_iterations
+        self.search_space = []
+        self.history = []
         self.n_iter = 0
         if self.search_iterations is None and self.search_method == 'random':
             raise ValueError('If search method is random, you have to specify number of iterations')
         self.setup_search_space()
 
     def setup_search_space(self):
-        self.search_space = []
         for i, arg in enumerate(self.base_args):
             if isinstance(arg, HyperParameter):
                 self.search_space.append((arg, 'args', i))
@@ -107,21 +122,30 @@ class HyperParameterManager(object):
                 self.search_space.append((v, 'kwargs', k))
 
     def get_model(self):
+        args = list(self.base_args)
+        kwargs = dict(self.base_kwargs.items())
+        hp_id = []
+
         if self.search_method == 'random':
             if self.n_iter >= self.search_iterations:
                 raise StopIteration()
-
-            args = list(self.base_args)
-            kwargs = dict(self.base_kwargs.items())
-            for hp, arg_type, arg_pos in self.search_space:
+            for i, (hp, arg_type, arg_pos) in enumerate(self.search_space):
                 # Here we might define other methods of sampling from the search space, for now we just do it randomly
-                ...
-
+                value = hp.random_sample()
+                if arg_type == 'args':
+                    args[arg_pos] = value
+                else:
+                    kwargs[arg_pos] = value
+                hp_id.append((i, value))
+        model = self.base_model(*args, **kwargs)
+        return hp_id, model
 
     def report(self, hp_id, performance):
-        pass
-
-
+        # The idea is that the manager can do things with this history. Since we will probably not have a lot of
+        # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
+        # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
+        # iterate over a list will be a small cost compared to evaluating each sample.
+        self.history.append((hp_id, performance))
 
 
 def hyper_parameter_train(*, base_model, base_args, base_kwargs, search_method='random',
@@ -155,7 +179,34 @@ def train(*,
           do_pre_eval=False,
           evaluation_metrics=('accuracy', 'loss'),
           **kwargs):
+    with Monitor(output_dir / 'logs') as monitor:
+        best_model_path = training_loop(model,
+                                        training_dataset,
+                                        evaluation_dataset,
+                                        max_epochs,
+                                        monitor,
+                                        evaluation_metrics,
+                                        best_metrics,
+                                        model_format_string,
+                                        eval_time=eval_time,
+                                        eval_iterations=eval_iterations,
+                                        eval_epochs=eval_epochs,
+                                        do_pre_eval=do_pre_eval,
+                                        keep_snapshots=keep_snapshots)
+        return best_model_path
 
+
+def setup_training(*,
+          model,
+          output_dir: Path,
+          metadata=None,
+          keep_snapshots=False,
+          eval_time=None,
+          eval_iterations=None,
+          eval_epochs=1,
+          checkpoint_suffix='.pkl',
+          model_format_string=None,
+          evaluation_metrics=('accuracy', 'loss')):
     if model_format_string is None:
         model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}' + checkpoint_suffix
 
@@ -173,10 +224,9 @@ def train(*,
         model_metadata = model.get_metadata()
         metadata['model_metadata'] = model_metadata
         print("Model parameters are: ")
-        print('\n'.join(list(sorted('{}: {}'.format(k,v) for k,v in model_metadata.items()))))
+        print('\n'.join(list(sorted('{}: {}'.format(k, v) for k, v in model_metadata.items()))))
     except AttributeError:
         print("Couldn't get model parameters, skipping model_params for the metadata")
-      
 
     training_params = dict(eval_time=eval_time,
                            eval_iterations=eval_iterations,
@@ -191,22 +241,8 @@ def train(*,
         metadata_fp.write(json_encoder.encode(metadata))
 
     evaluation_metrics, best_metrics = setup_metrics(evaluation_metrics)
-    with Monitor(output_dir / 'logs') as monitor:
-        best_model_path = training_loop(model,
-                                        training_dataset,
-                                        evaluation_dataset,
-                                        max_epochs,
-                                        monitor,
-                                        evaluation_metrics,
-                                        best_metrics,
-                                        model_format_string,
-                                        eval_time=eval_time,
-                                        eval_iterations=eval_iterations,
-                                        eval_epochs=eval_epochs,
-                                        do_pre_eval=do_pre_eval,
-                                        keep_snapshots=keep_snapshots)
-        return best_model_path
 
+    pass
 
 def setup_metrics(evaluation_metrics):
     fixed_evaluation_metrics = []
