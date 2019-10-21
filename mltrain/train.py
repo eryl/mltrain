@@ -84,19 +84,75 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
 
 
 class HyperParameter(object):
+    def __init__(self, rng=None):
+        if rng is None:
+            rng = np.random.RandomState()
+        self.rng = rng
+
+    def __repr__(self):
+        raise NotImplementedError()
+
     def random_sample(self):
         ...
 
+class IntegerRangeHyperParameter(HyperParameter):
+    def __init__(self, low, high=None, rng=None):
+        super().__init__(rng=rng)
+        if high is None:
+            high = low
+            low = 0
+        self.low = low
+        self.high = high
+        #self.current_item = low  # We'll see how we implement grid search, if it's done with an iterator this variable
+                                  # will not be needed
+    def __repr__(self):
+        return "<{} low:{},high:{}>".format(self.__class__.__name__, self.low, self.high)
+
+    def random_sample(self):
+        return self.rng.randint(self.low, self.high)
+
+
 class DiscreteHyperParameter(HyperParameter):
-    ...
+    def __init__(self, values, rng=None):
+        super().__init__(rng=rng)
+        self.values = list(sorted(values))
+        self.current_item = 0
+
+    def random_sample(self):
+        return self.rng.choice(self.values)
+
+    def __repr__(self):
+        return "<{} values:{}>".format(self.__class__.__name__, self.values)
 
 
 class LinearHyperParameter(HyperParameter):
-    ...
+    def __init__(self, low, high=None, num=None, rng=None):
+        super().__init__(rng=rng)
+        if high is None:
+            high = low
+            low = 0
+        self.low = low
+        self.high = high
+        self.num = num
+
+    def random_sample(self):
+        return (self.high - self.low) * self.rng.random_sample() + self.low
+
+    def __repr__(self):
+        return "<{} low:{},high:{},num:{}>".format(self.__class__.__name__, self.low, self.high, self.num)
 
 
-class LogLinearHyperParameter(LinearHyperParameter):
-    ...
+class GeometricHyperParameter(LinearHyperParameter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.low = np.log10(self.low)
+        self.high = np.log10(self.high)
+
+    def random_sample(self):
+        # If we transform the space from low to high to a log-scale and then draw uniform samples in that space,
+        # by exponentiating them we should get the right value
+        sample = LinearHyperParameter.random_sample(self)
+        return np.power(10, sample)
 
 
 class HyperParameterManager(object):
@@ -156,9 +212,11 @@ def hyper_parameter_train(*, base_model, base_args, base_kwargs, search_method='
     best_model_path = None
     try:
         while True:
-            hp_id, model = hp_manager.get_model()
-            performance, best_model_path = train(model=model, **train_kwargs)
-            hp_manager.report(hp_id, performance)
+            with tqdm(desc='Hyper parameter') as pbar:
+                hp_id, model = hp_manager.get_model()
+                performance, best_model_path = train(model=model, **train_kwargs)
+                hp_manager.report(hp_id, performance)
+                pbar.update()
     except StopIteration:
         return best_model_path
 
@@ -179,8 +237,18 @@ def train(*,
           do_pre_eval=False,
           evaluation_metrics=('accuracy', 'loss'),
           **kwargs):
+    evaluation_metrics, best_metrics, model_format_string = setup_training(model=model,
+                                                                           output_dir=output_dir,
+                                                                           metadata=metadata,
+                                                                           keep_snapshots=keep_snapshots,
+                                                                           eval_time=eval_time,
+                                                                           eval_iterations=eval_iterations,
+                                                                           eval_epochs=eval_epochs,
+                                                                           checkpoint_suffix=checkpoint_suffix,
+                                                                           model_format_string=model_format_string,
+                                                                           evaluation_metrics=evaluation_metrics)
     with Monitor(output_dir / 'logs') as monitor:
-        best_model_path = training_loop(model,
+        best_metrics, best_model_path = training_loop(model,
                                         training_dataset,
                                         evaluation_dataset,
                                         max_epochs,
@@ -193,7 +261,7 @@ def train(*,
                                         eval_epochs=eval_epochs,
                                         do_pre_eval=do_pre_eval,
                                         keep_snapshots=keep_snapshots)
-        return best_model_path
+        return best_metrics, best_model_path
 
 
 def setup_training(*,
@@ -241,8 +309,8 @@ def setup_training(*,
         metadata_fp.write(json_encoder.encode(metadata))
 
     evaluation_metrics, best_metrics = setup_metrics(evaluation_metrics)
+    return evaluation_metrics, best_metrics, model_format_string
 
-    pass
 
 def setup_metrics(evaluation_metrics):
     fixed_evaluation_metrics = []
@@ -335,7 +403,7 @@ def training_loop(model,
 
     # Done with the whole training loop
     best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch, **eval_kwargs)
-    return best_model_path
+    return best_metrics, best_model_path
 
 
 def evaluate_model(*,
