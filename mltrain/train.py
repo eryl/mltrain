@@ -237,7 +237,7 @@ def train(*,
           do_pre_eval=False,
           evaluation_metrics=('accuracy', 'loss'),
           **kwargs):
-    evaluation_metrics, best_metrics, model_format_string = setup_training(model=model,
+    evaluation_metrics, best_metrics, model_format_string, output_dir = setup_training(model=model,
                                                                            output_dir=output_dir,
                                                                            metadata=metadata,
                                                                            keep_snapshots=keep_snapshots,
@@ -309,7 +309,7 @@ def setup_training(*,
         metadata_fp.write(json_encoder.encode(metadata))
 
     evaluation_metrics, best_metrics = setup_metrics(evaluation_metrics)
-    return evaluation_metrics, best_metrics, model_format_string
+    return evaluation_metrics, best_metrics, model_format_string, output_dir
 
 
 def setup_metrics(evaluation_metrics):
