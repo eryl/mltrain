@@ -185,6 +185,7 @@ class HyperParameterManager(object):
         if self.search_method == 'random':
             if self.n_iter >= self.search_iterations:
                 raise StopIteration()
+            self.n_iter += 1
             for i, (hp, arg_type, arg_pos) in enumerate(self.search_space):
                 # Here we might define other methods of sampling from the search space, for now we just do it randomly
                 value = hp.random_sample()
