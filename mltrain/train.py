@@ -448,6 +448,7 @@ def evaluate_model(*,
                                  printout_metrics, is_best, remove_models=not keep_snapshots)
     if is_best:
         best_metrics = printout_metrics
+        monitor.log_now({'best_{}'.format(k):v for k,v in best_metrics.items()})
     return best_metrics, best_model_path
 
 
