@@ -13,6 +13,7 @@ import unittest
 import signal
 from collections import defaultdict
 from pathlib import Path
+from collections.abc import Collection, Mapping
 
 from tqdm import trange, tqdm
 import numpy as np
@@ -170,30 +171,27 @@ class HyperParameterManager(object):
         self.setup_search_space()
 
     def setup_search_space(self):
-        for i, arg in enumerate(self.base_args):
-            if isinstance(arg, HyperParameter):
-                self.search_space.append((arg, 'args', i))
-        for k, v in self.base_kwargs.items():
-            if isinstance(v, HyperParameter):
-                self.search_space.append((v, 'kwargs', k))
+        # for i, arg in enumerate(self.base_args):
+        #     if isinstance(arg, HyperParameter):
+        #         self.search_space.append((arg, 'args', i))
+        # for k, v in self.base_kwargs.items():
+        #     if isinstance(v, HyperParameter):
+        #         self.search_space.append((v, 'kwargs', k))
+        ...
 
     def get_model(self):
         args = list(self.base_args)
         kwargs = dict(self.base_kwargs.items())
-        hp_id = []
 
-        if self.search_method == 'random':
-            if self.n_iter >= self.search_iterations:
-                raise StopIteration()
-            self.n_iter += 1
-            for i, (hp, arg_type, arg_pos) in enumerate(self.search_space):
-                # Here we might define other methods of sampling from the search space, for now we just do it randomly
-                value = hp.random_sample()
-                if arg_type == 'args':
-                    args[arg_pos] = value
-                else:
-                    kwargs[arg_pos] = value
-                hp_id.append((i, value))
+
+        if self.n_iter >= self.search_iterations:
+            raise StopIteration()
+        self.n_iter += 1
+        hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
+                             # the hp-point produced
+        args = self.materialize_hyper_params(args)
+        kwargs = self.materialize_hyper_params(kwargs)
+
         model = self.base_model(*args, **kwargs)
         return hp_id, model
 
@@ -203,6 +201,18 @@ class HyperParameterManager(object):
         # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
         # iterate over a list will be a small cost compared to evaluating each sample.
         self.history.append((hp_id, performance))
+
+    def materialize_hyper_params(self, obj):
+        """Make any HyperParameter a concrete object"""
+        if isinstance(obj, Mapping):
+            return type(obj)((k, self.materialize_hyper_params(v)) for k, v in obj.items())
+        elif isinstance(obj, Collection):
+            return type(obj)(self.materialize_hyper_params(x) for x in obj)
+        elif isinstance(obj, HyperParameter):
+            if self.search_method == 'random':
+                return obj.random_sample()
+        else:
+            return obj
 
 
 def hyper_parameter_train(*, base_model, base_args, base_kwargs, search_method='random',
