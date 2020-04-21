@@ -501,6 +501,7 @@ def training_loop(*,
     eval_timestamp = time.time()
     eval_epoch = 0
     eval_iteration = 0
+    needs_final_eval = True
 
     if do_pre_eval:
         best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
@@ -508,6 +509,7 @@ def training_loop(*,
     for epoch in trange(max_epochs, desc='Epochs'):
         ## This is the main training loop
         for i, batch in enumerate(tqdm(training_dataset, desc='Training batch')):
+            needs_final_eval = True
             epoch_fraction = epoch + i / len(training_dataset)
             training_results = model.fit(batch)
             monitor.log_one_now('epoch', epoch_fraction)
@@ -523,18 +525,22 @@ def training_loop(*,
                 best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
                 eval_timestamp = time.time()
                 eval_iteration = 0
+                needs_final_eval = False
 
             monitor.tick()
             # End of training loop
 
         eval_epoch += 1
         if (eval_epochs is not None and eval_epochs > 0 and eval_epoch >= eval_epochs):
-            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch + 1, **eval_kwargs)
+            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
             eval_epoch = 0
+            needs_final_eval = False
         # End of epoch
 
-    # Done with the whole training loop
-    best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
+    # Done with the whole training loop. If we ran the evaluate_model at the end of the last epoch, we shouldn't do
+    # it again
+    if needs_final_eval:
+        best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
     return best_metrics, best_model_path
 
 
