@@ -618,8 +618,8 @@ def checkpoint(model,
                 # to remove
                 previous_best_model = best_model_symlink.resolve(strict=True)
                 previous_best_model.unlink()
-            if best_model_symlink.is_symlink():
-                best_model_symlink.unlink()
+        if best_model_symlink.is_symlink():
+            best_model_symlink.unlink()
         best_model_symlink.symlink_to(checkpoint_path)
 
     return best_model_symlink.resolve()
