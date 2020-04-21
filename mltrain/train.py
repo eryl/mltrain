@@ -595,9 +595,9 @@ def checkpoint(model,
                performances,
                is_best, latest_model_name='latest_model', best_model_name='best_model',
                remove_models=True):
-    model_directory = checkpoint_format.parent
+    model_directory = checkpoint_format.parent.resolve(strict=False)
     model_name = checkpoint_format.name.format(epoch=epoch, metrics=performances)
-    checkpoint_path = checkpoint_format.with_name(model_name)
+    checkpoint_path = checkpoint_format.with_name(model_name).resolve()
     model_directory.mkdir(exist_ok=True)
     model.save(checkpoint_path)
     model_suffix = checkpoint_path.suffix
@@ -607,11 +607,13 @@ def checkpoint(model,
     if remove_models and latest_model_symlink.exists():
         latest_model = latest_model_symlink.resolve(strict=True)
         if not best_model_symlink.exists() or latest_model != best_model_symlink.resolve(strict=True):
-                latest_model.unlink()
+            latest_model.unlink()
 
-    if latest_model_symlink.exists() or latest_model_symlink.is_symlink():
+    if os.path.lexists(latest_model_symlink):
         latest_model_symlink.unlink()
-    latest_model_symlink.symlink_to(checkpoint_path)
+
+    relative_checkpoint =  checkpoint_path.relative_to(latest_model_symlink.absolute().parent)
+    latest_model_symlink.symlink_to(relative_checkpoint)
 
     if is_best:
         # Path.exists() on a symlink will return True if what the symlink points to exists, not if the symlink exists
@@ -626,7 +628,8 @@ def checkpoint(model,
                 previous_best_model.unlink()
         if best_model_symlink.is_symlink():
             best_model_symlink.unlink()
-        best_model_symlink.symlink_to(checkpoint_path)
+        relative_checkpoint =  checkpoint_path.relative_to(best_model_symlink.absolute().parent)
+        best_model_symlink.symlink_to(relative_checkpoint)
 
     return best_model_symlink.resolve()
 
