@@ -13,10 +13,32 @@ import unittest
 import signal
 from collections import defaultdict
 from pathlib import Path
+from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping
 
 from tqdm import trange, tqdm
 import numpy as np
+
+class BaseModel(ABC):
+    @abstractmethod
+    def fit(self, batch):
+        pass
+
+    @abstractmethod
+    def get_metadata(self):
+        pass
+
+    @abstractmethod
+    def evaluation_metrics(self):
+        pass
+
+    @abstractmethod
+    def evaluate(self, batch):
+        pass
+
+    @abstractmethod
+    def save(self, save_path):
+        pass
 
 
 class JSONEncoder(json.JSONEncoder):
@@ -116,7 +138,7 @@ class IntegerRangeHyperParameter(HyperParameter):
 class DiscreteHyperParameter(HyperParameter):
     def __init__(self, values, rng=None):
         super().__init__(rng=rng)
-        self.values = list(sorted(values))
+        self.values = list(values)
         self.current_item = 0
 
     def random_sample(self):
@@ -157,17 +179,14 @@ class GeometricHyperParameter(LinearHyperParameter):
 
 
 class HyperParameterManager(object):
-    def __init__(self, base_model, base_args, base_kwargs, search_method='random', search_iterations=None):
-        self.base_model = base_model
+    def __init__(self, base_args, base_kwargs, search_method='random'):
         self.base_args = base_args
         self.base_kwargs = base_kwargs
         self.search_method = search_method
-        self.search_iterations = search_iterations
         self.search_space = []
-        self.history = []
+        self.hyper_parameters = dict()
+        self.history = defaultdict(list)
         self.n_iter = 0
-        if self.search_iterations is None and self.search_method == 'random':
-            raise ValueError('If search method is random, you have to specify number of iterations')
         self.setup_search_space()
 
     def setup_search_space(self):
@@ -177,30 +196,25 @@ class HyperParameterManager(object):
         # for k, v in self.base_kwargs.items():
         #     if isinstance(v, HyperParameter):
         #         self.search_space.append((v, 'kwargs', k))
-        ...
+        pass
 
-    def get_model(self):
+    def get_hyper_parameters(self):
         args = list(self.base_args)
         kwargs = dict(self.base_kwargs.items())
-
-
-        if self.n_iter >= self.search_iterations:
-            raise StopIteration()
         self.n_iter += 1
         hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
                              # the hp-point produced
         args = self.materialize_hyper_params(args)
         kwargs = self.materialize_hyper_params(kwargs)
-
-        model = self.base_model(*args, **kwargs)
-        return hp_id, model
+        self.hyper_parameters[hp_id] = (args, kwargs)
+        return hp_id, args, kwargs
 
     def report(self, hp_id, performance):
         # The idea is that the manager can do things with this history. Since we will probably not have a lot of
         # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
         # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
         # iterate over a list will be a small cost compared to evaluating each sample.
-        self.history.append((hp_id, performance))
+        self.history[hp_id].append(performance)
 
     def materialize_hyper_params(self, obj):
         """Make any HyperParameter a concrete object"""
@@ -211,25 +225,53 @@ class HyperParameterManager(object):
         elif isinstance(obj, HyperParameter):
             if self.search_method == 'random':
                 return obj.random_sample()
+            else:
+                raise NotImplementedError('Search method {} is not implemetned'.format(self.search_method))
         else:
             return obj
 
+    def best_hyper_params(self):
+        best_performance = None
+        best_args = None
+        best_kwargs = None
+        for hp_id, performances in self.history.items():
+            for performance in performances:
+                if best_performance is None or performance.cmp(best_performance):
+                    best_performance = performance
+                    best_args, best_kwargs = self.hyper_parameters[hp_id]
+        return best_args, best_kwargs
 
-def hyper_parameter_train(*, base_model, base_args, base_kwargs, search_method='random',
-                          search_iterations=None, **train_kwargs):
-    # Figure out what args are Hyper Parameter configurations
-    hp_manager = HyperParameterManager(base_model, base_args, base_kwargs,
-                                       search_method=search_method, search_iterations=search_iterations)
-    best_model_path = None
-    try:
-        while True:
-            with tqdm(desc='Hyper parameter') as pbar:
-                hp_id, model = hp_manager.get_model()
-                performance, best_model_path = train(model=model, **train_kwargs)
-                hp_manager.report(hp_id, performance)
-                pbar.update()
-    except StopIteration:
-        return best_model_path
+
+class HyperParameterTrainer(object):
+    def __init__(self, *, base_model, base_args, base_kwargs,
+                 search_method='random'):
+        self.base_model = base_model
+        self.base_args = base_args
+        self.base_kwargs = base_kwargs
+        self.hp_manager = HyperParameterManager(base_args, base_kwargs,
+                                                search_method=search_method)
+        self.search_method = search_method
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def train(self, n, **train_kwargs):
+        try:
+            for i in trange(n, desc='Hyper parameter'):
+                    hp_id, args, kwargs = self.hp_manager.get_hyper_parameters()
+                    model = self.base_model(*args, **kwargs)
+                    performance, best_model_path = train(model=model,
+                                                         **train_kwargs)
+                    self.hp_manager.report(hp_id, performance)
+        except StopIteration:
+            return self.hp_manager.best_hyper_params()
+
+    def get_best_hyper_params(self):
+        return self.hp_manager.best_hyper_params()
+
 
 
 def train(*,
@@ -245,34 +287,30 @@ def train(*,
           eval_epochs=1,
           checkpoint_suffix='.pkl',
           model_format_string=None,
-          do_pre_eval=False,
-          evaluation_metrics=('accuracy', 'loss'),
-          **kwargs):
-    evaluation_metrics, best_metrics, model_format_string, output_dir = setup_training(model=model,
-                                                                           output_dir=output_dir,
-                                                                           metadata=metadata,
-                                                                           keep_snapshots=keep_snapshots,
-                                                                           eval_time=eval_time,
-                                                                           eval_iterations=eval_iterations,
-                                                                           eval_epochs=eval_epochs,
-                                                                           checkpoint_suffix=checkpoint_suffix,
-                                                                           model_format_string=model_format_string,
-                                                                           evaluation_metrics=evaluation_metrics)
+          do_pre_eval=False):
+    best_performance, model_format_string, output_dir = setup_training(model=model,
+                                                                       output_dir=output_dir,
+                                                                       metadata=metadata,
+                                                                       keep_snapshots=keep_snapshots,
+                                                                       eval_time=eval_time,
+                                                                       eval_iterations=eval_iterations,
+                                                                       eval_epochs=eval_epochs,
+                                                                       checkpoint_suffix=checkpoint_suffix,
+                                                                       model_format_string=model_format_string)
     with Monitor(output_dir / 'logs') as monitor:
-        best_metrics, best_model_path = training_loop(model,
-                                        training_dataset,
-                                        evaluation_dataset,
-                                        max_epochs,
-                                        monitor,
-                                        evaluation_metrics,
-                                        best_metrics,
-                                        model_format_string,
-                                        eval_time=eval_time,
-                                        eval_iterations=eval_iterations,
-                                        eval_epochs=eval_epochs,
-                                        do_pre_eval=do_pre_eval,
-                                        keep_snapshots=keep_snapshots)
-        return best_metrics, best_model_path
+        best_performance, best_model_path = training_loop(model=model,
+                                                          training_dataset=training_dataset,
+                                                          evaluation_dataset=evaluation_dataset,
+                                                          max_epochs=max_epochs,
+                                                          monitor=monitor,
+                                                          best_performance=best_performance,
+                                                          model_checkpoint_format=model_format_string,
+                                                          eval_time=eval_time,
+                                                          eval_iterations=eval_iterations,
+                                                          eval_epochs=eval_epochs,
+                                                          do_pre_eval=do_pre_eval,
+                                                          keep_snapshots=keep_snapshots)
+        return best_performance, best_model_path
 
 
 def setup_training(*,
@@ -284,8 +322,7 @@ def setup_training(*,
           eval_iterations=None,
           eval_epochs=1,
           checkpoint_suffix='.pkl',
-          model_format_string=None,
-          evaluation_metrics=('accuracy', 'loss')):
+          model_format_string=None):
     if model_format_string is None:
         model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}' + checkpoint_suffix
 
@@ -319,42 +356,126 @@ def setup_training(*,
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as metadata_fp:
         metadata_fp.write(json_encoder.encode(metadata))
 
-    evaluation_metrics, best_metrics = setup_metrics(evaluation_metrics)
-    return evaluation_metrics, best_metrics, model_format_string, output_dir
+    best_performance = setup_metrics(model.evaluation_metrics())
+    return best_performance, model_format_string, output_dir
 
+
+class EvaluationMetric(object):
+    def __init__(self, name):
+        self.name = name
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __eq__(self, other):
+        return self.name == other.name
+
+    def __str__(self):
+        return self.name
+
+    def cmp(self, a, b):
+        raise NotImplementedError()
+
+
+class HigherIsBetterMetric(EvaluationMetric):
+    def __init__(self, name):
+        super().__init__(name)
+        self.worst_value = -np.inf
+
+    def cmp(self, a, b):
+        return a > b
+
+
+class LowerIsBetterMetric(EvaluationMetric):
+    def __init__(self, name):
+        super().__init__(name)
+        self.worst_value = np.inf
+
+    def cmp(self, a, b):
+        return a < b
+
+
+class Performance(object):
+    def __init__(self, metric, value=None):
+        self.metric = metric
+        if value is None:
+            value = metric.worst_value
+        self.value = value
+
+    def cmp(self, other):
+        return self.metric.cmp(self.value, other.value)
+
+    def __str__(self):
+        return str(self.value)
+
+
+class PerformanceCollection(object):
+    def __init__(self, performances):
+        self.metrics = [p.metric for p in performances] # Keeps the order of the performance objects
+        self.performances = { p.metric:p for p in performances}
+
+    def cmp(self, other):
+        for metric in self.metrics:
+            performance = self.performances[metric]
+            other_performance = other.get_performance(metric)
+            if performance.cmp(other_performance):
+                # This performance is better than the other
+                return True
+            elif other_performance.cmp(performance):
+                # This performance is equal to the other, we need to look at the next metric
+                return False
+            else:
+                # This performance is worse than the other
+                continue
+        return True  # If two performance collections are exactly the same, we return this one as the better
+
+    def get_performance(self, metric):
+        return self.performances[metric]
+
+    def update(self, value_map):
+        """
+        Return a new PerformanceCollection where the metrics are updated according to the
+        values in the value map
+        :param value_map:
+        :return:
+        """
+        performances = [Performance(metric, value_map[metric.name]) for metric in self.metrics]
+        return PerformanceCollection(performances)
+
+    def get_metrics(self):
+        return self.metrics
+
+    def __str__(self):
+        return '_'.join('{}:{}'.format(metric.name, self.performances[metric].value) for metric in self.metrics)
+
+    def items(self):
+        yield from self.performances.items()
 
 def setup_metrics(evaluation_metrics):
-    fixed_evaluation_metrics = []
-    best_metrics = dict()
+    base_performances = []
     for evaluation_metric in evaluation_metrics:
-        try:
-            evaluation_metric, comparator = evaluation_metric
-        except ValueError:
+        if isinstance(evaluation_metric, str):
             if 'loss' in evaluation_metric:
-                comparator = operator.le
+                evaluation_metric = LowerIsBetterMetric(evaluation_metric)
             elif 'accuracy' in evaluation_metric:
-                comparator = operator.ge
+                evaluation_metric = HigherIsBetterMetric(evaluation_metric)
             else:
                 raise RuntimeError(
-                    "We don't know how to compare metrics {}. Please supply comparator.".format(evaluation_metric))
-        fixed_evaluation_metrics.append((evaluation_metric, comparator))
-        # The metrics needs to be scalar for this to work
-        pos_inf = np.inf
-        neg_inf = -pos_inf
-        if comparator(pos_inf, neg_inf):
-            best_metrics[evaluation_metric] = neg_inf
-        else:
-            best_metrics[evaluation_metric] = pos_inf
-    return fixed_evaluation_metrics, best_metrics
+                    "Metric {} is not implemented, please supply an EvaluationMetric object instead.".format(evaluation_metric))
+        if isinstance(evaluation_metric, EvaluationMetric):
+            base_performance = Performance(evaluation_metric)
+            base_performances.append(base_performance)
+    best_performance = PerformanceCollection(base_performances)
+    return best_performance
 
 
-def training_loop(model,
+def training_loop(*,
+                  model,
                   training_dataset,
                   evaluation_dataset,
                   max_epochs,
                   monitor,
-                  evaluation_metrics,
-                  best_metrics,
+                  best_performance,
                   model_checkpoint_format,
                   eval_time=None,
                   eval_iterations=None,
@@ -373,7 +494,6 @@ def training_loop(model,
     # Since we call evaluate_models from som many places below, we summarize the common arguments in a dict
     eval_kwargs = dict(model=model,
                        evaluation_dataset=evaluation_dataset,
-                       evaluation_metrics=evaluation_metrics,
                        model_checkpoint_format=model_checkpoint_format,
                        monitor=monitor,
                        keep_snapshots=keep_snapshots)
@@ -383,7 +503,7 @@ def training_loop(model,
     eval_iteration = 0
 
     if do_pre_eval:
-        best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=0, **eval_kwargs)
+        best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
 
     for epoch in trange(max_epochs, desc='Epochs'):
         ## This is the main training loop
@@ -391,7 +511,8 @@ def training_loop(model,
             epoch_fraction = epoch + i / len(training_dataset)
             training_results = model.fit(batch)
             monitor.log_one_now('epoch', epoch_fraction)
-            monitor.log_now(training_results)
+            if training_results is not None:
+                monitor.log_now(training_results)
 
             # eval_time and eval_iterations allow the user to control how often to run evaluations
             eval_time_dt = time.time() - eval_timestamp
@@ -399,7 +520,7 @@ def training_loop(model,
 
             if ((eval_time is not None and eval_time > 0 and eval_time_dt >= eval_time) or
                 (eval_iterations is not None and eval_iterations > 0 and eval_iteration >= eval_iterations)):
-                best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch_fraction, **eval_kwargs)
+                best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
                 eval_timestamp = time.time()
                 eval_iteration = 0
 
@@ -408,20 +529,19 @@ def training_loop(model,
 
         eval_epoch += 1
         if (eval_epochs is not None and eval_epochs > 0 and eval_epoch >= eval_epochs):
-            best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch + 1, **eval_kwargs)
+            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch + 1, **eval_kwargs)
             eval_epoch = 0
         # End of epoch
 
     # Done with the whole training loop
-    best_metrics, best_model_path = evaluate_model(best_metrics=best_metrics, epoch=epoch, **eval_kwargs)
+    best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
     return best_metrics, best_model_path
 
 
 def evaluate_model(*,
                    model,
                    evaluation_dataset,
-                   evaluation_metrics,
-                   best_metrics,
+                   best_performance,
                    model_checkpoint_format,
                    epoch,
                    monitor=None,
@@ -437,29 +557,19 @@ def evaluate_model(*,
                 evaluation_results[k] = np.mean(v)
             except TypeError:
                 print("Not logging result {}, can't aggregate data type".format(k))
+    new_performance = best_performance.update(evaluation_results)
 
-    printout_metrics = {}
-    # For the model to be the new best, it should be at least as good as the old model on all evaluation metrics
-    # The problem is how to compare metrics, e.g. lower loss is better while higher accuracy is better
-    comparisons = []
-    for evaluation_metric, comparator in evaluation_metrics:
-        # We prune the evaluation metrics to only include those which have matching values in the evaluation results
-        for evaluation_result_key, evaluation_result_mean in evaluation_results.items():
-            if evaluation_metric in evaluation_result_key:
-                printout_metrics[evaluation_metric] = evaluation_result_mean
-                previous_best = best_metrics[evaluation_metric]
-                comparisons.append(comparator(evaluation_result_mean, previous_best))
+    is_best = new_performance.cmp(best_performance)
 
-    is_best = np.all(comparisons)
     if monitor is not None:
         monitor.log_now({k: v for k,v in evaluation_results.items()})
 
     best_model_path = checkpoint(model, model_checkpoint_format, epoch,
-                                 printout_metrics, is_best, remove_models=not keep_snapshots)
+                                 new_performance, is_best, remove_models=not keep_snapshots)
     if is_best:
-        best_metrics = printout_metrics
-        monitor.log_now({'best_{}'.format(k):v for k,v in best_metrics.items()})
-    return best_metrics, best_model_path
+        best_performance = new_performance
+        monitor.log_now({'best_{}'.format(k):v for k,v in best_performance.items()})
+    return best_performance, best_model_path
 
 
 def setup_directory(output_dir: Path):
@@ -476,12 +586,11 @@ def setup_directory(output_dir: Path):
 def checkpoint(model,
                checkpoint_format: Path,
                epoch,
-               metrics,
+               performances,
                is_best, latest_model_name='latest_model', best_model_name='best_model',
                remove_models=True):
     model_directory = checkpoint_format.parent
-    metrics_string = '_'.join(['{}:{:.03f}'.format(k,v) for k,v in metrics.items()])
-    model_name = checkpoint_format.name.format(epoch=epoch, metrics=metrics_string)
+    model_name = checkpoint_format.name.format(epoch=epoch, metrics=performances)
     checkpoint_path = checkpoint_format.with_name(model_name)
     model_directory.mkdir(exist_ok=True)
     model.save(checkpoint_path)
