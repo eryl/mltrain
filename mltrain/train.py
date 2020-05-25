@@ -586,7 +586,8 @@ def setup_directory(output_dir: Path):
     symlink_name = parent_dir / 'latest_experiment'
     if symlink_name.is_symlink() or symlink_name.exists():
         symlink_name.unlink()
-    symlink_name.symlink_to(output_dir)
+
+    symlink_name.symlink_to(output_dir.relative_to(parent_dir))
 
 
 def checkpoint(model,
@@ -612,7 +613,7 @@ def checkpoint(model,
     if os.path.lexists(latest_model_symlink):
         latest_model_symlink.unlink()
 
-    relative_checkpoint =  checkpoint_path.relative_to(latest_model_symlink.absolute().parent)
+    relative_checkpoint = checkpoint_path.relative_to(latest_model_symlink.absolute().parent)
     latest_model_symlink.symlink_to(relative_checkpoint)
 
     if is_best:
