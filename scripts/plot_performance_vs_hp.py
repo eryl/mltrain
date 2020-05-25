@@ -35,7 +35,7 @@ def main():
                     param_value = float(param_value)
                 experiment_data[hp_param] = param_value
             log_dir = metadata_file.with_name('logs')
-            print(list(f.name for f in log_dir.iterdir()))
+
             for performance_metric in args.performance_metrics:
                 performance_metric_file = log_dir / 'best_{}.txt'.format(performance_metric)
                 metric_value = None
@@ -58,8 +58,6 @@ def main():
     values = list(zip(*values))
     plotting.parallel_coordinates(values, dim_labels=dim_labels, c=transpose_data[args.performance_metrics[0]])
     plt.show()
-    print(transpose_data)
-
 
 
 if __name__ == '__main__':
