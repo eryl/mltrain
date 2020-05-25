@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.colors
 
-def parallel_coordinates(data_sets, c=None, dim_labels=None):
+def parallel_coordinates(data_sets, c=None, dim_labels=None, **plot_kwargs):
     """From StackOverflow: https://stackoverflow.com/questions/8230638/parallel-coordinates-plot-in-matplotlib"""
 
     dims = len(data_sets[0])
@@ -40,7 +40,7 @@ def parallel_coordinates(data_sets, c=None, dim_labels=None):
     # Plot the datasets on all the subplots
     for i, ax in enumerate(axes):
         for dsi, d in enumerate(data_sets):
-            ax.plot(x, d, c=c[dsi])
+            ax.plot(x, d, c=c[dsi], **plot_kwargs)
         ax.set_xlim([x[i], x[i + 1]])
 
 
