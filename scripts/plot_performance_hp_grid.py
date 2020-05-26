@@ -30,7 +30,7 @@ def main():
                 for d in data:
                     hp_i_val = float(d[hp_i])
                     hp_j_val = float(d[hp_j])
-                    hp_j_vals.add(hp_i_val)
+                    hp_j_vals.add(hp_j_val)
                     perf = float(d[performance_metric])
                     summary[hp_i_val][hp_j_val].append(perf)
                 hp_j_vals = list(sorted(hp_j_vals))
