@@ -10,7 +10,7 @@ import seaborn as sns
 def main():
     parser = argparse.ArgumentParser(description="Plot performence vs hyper parameters")
     parser.add_argument('performance_data', help="CSV with performance data produced by `gather_performance_data.py`", type=Path)
-    parser.add_argument('--performance-metrics', nargs='+', default=["mean_absolute_error"])
+    parser.add_argument('--performance-metrics', nargs='+', default=["median_absolute_deviance"])
     parser.add_argument('--hyper-parameters', nargs='+', default=['max_depth', 'n_estimators'])
     args = parser.parse_args()
 
@@ -28,11 +28,22 @@ def main():
                 summary = defaultdict(lambda: defaultdict(list))
                 hp_j_vals = set()
                 for d in data:
-                    hp_i_val = float(d[hp_i])
-                    hp_j_val = float(d[hp_j])
+                    try:
+                        hp_i_val = float(d[hp_i])
+                    except ValueError:
+                        hp_i_val = -1
+                    try:
+                        hp_j_val = float(d[hp_j])
+                    except ValueError:
+                        hp_j_val = -1
                     hp_j_vals.add(hp_j_val)
-                    perf = float(d[performance_metric])
-                    summary[hp_i_val][hp_j_val].append(perf)
+                    perf = d[performance_metric]
+                    if perf:
+                        try:
+                            perf = float(perf)
+                        except ValueError:
+                            pass
+                        summary[hp_i_val][hp_j_val].append(perf)
                 hp_j_vals = list(sorted(hp_j_vals))
                 n_rows = len(summary)
                 n_cols = len(hp_j_vals)
@@ -49,7 +60,6 @@ def main():
                             ax.set_title(hp_j_val)
                 plt.figtext(0.005, 0.45, hp_i, rotation=90)
                 plt.figtext(0.45, 0.97, hp_j, rotation=0)
-
     plt.show()
 
 
