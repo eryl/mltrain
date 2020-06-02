@@ -574,7 +574,14 @@ def evaluate_model(*,
                                  new_performance, is_best, remove_models=not keep_snapshots)
     if is_best:
         best_performance = new_performance
-        monitor.log_now({'best_{}'.format(k):v for k,v in best_performance.items()})
+        if monitor is not None:
+            monitor.log_now({'best_{}'.format(k):v for k,v in best_performance.items()})
+        best_performance_file = model_checkpoint_format.with_name('best_performance.csv')
+        with open(best_performance_file, 'w') as fp:
+            items = [(k.name, v) for k,v in best_performance.items()]
+            keys, vals = zip(*sorted(items))
+            fp.write(','.join(str(k) for k in keys) + '\n')
+            fp.write(','.join(str(v) for v in vals) + '\n')
     return best_performance, best_model_path
 
 
@@ -629,7 +636,7 @@ def checkpoint(model,
                 previous_best_model.unlink()
         if best_model_symlink.is_symlink():
             best_model_symlink.unlink()
-        relative_checkpoint =  checkpoint_path.relative_to(best_model_symlink.absolute().parent)
+        relative_checkpoint = checkpoint_path.relative_to(best_model_symlink.absolute().parent)
         best_model_symlink.symlink_to(relative_checkpoint)
 
     return best_model_symlink.resolve()
