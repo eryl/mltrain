@@ -241,6 +241,10 @@ class HyperParameterManager(object):
                     best_args, best_kwargs = self.hyper_parameters[hp_id]
         return best_args, best_kwargs
 
+    def get_any_hyper_params(self):
+        hp_id, args, kwargs = self.get_hyper_parameters()
+        return args, kwargs
+
 
 class HyperParameterTrainer(object):
     def __init__(self, *, base_model, base_args, base_kwargs,
@@ -272,7 +276,8 @@ class HyperParameterTrainer(object):
     def get_best_hyper_params(self):
         return self.hp_manager.best_hyper_params()
 
-
+    def get_any_hyper_params(self):
+        return self.hp_manager.get_any_hyper_params()
 
 def train(*,
           model,
