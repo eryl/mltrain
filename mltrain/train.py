@@ -50,6 +50,16 @@ class JSONEncoder(json.JSONEncoder):
             return str(o)
 
 
+class TrainingError(Exception):
+    def __init__(self, metadata, message):
+        self.metadata = metadata
+        self.message = message
+
+    def __str__(self):
+        return f"{self.message}\n Metadata was: {self.metadata}"
+
+
+
 def run_experiments(num_experiments, experiment_kwargs_list, experiment_function, kwargs, rng=None):
     if rng is None:
         rng = np.random.RandomState()
@@ -220,13 +230,13 @@ class HyperParameterManager(object):
         """Make any HyperParameter a concrete object"""
         if isinstance(obj, Mapping):
             return type(obj)((k, self.materialize_hyper_params(v)) for k, v in obj.items())
-        elif isinstance(obj, Collection):
+        elif isinstance(obj, Collection) and not isinstance(obj, (str, bytes, bytearray, np.ndarray)):
             return type(obj)(self.materialize_hyper_params(x) for x in obj)
         elif isinstance(obj, HyperParameter):
             if self.search_method == 'random':
                 return obj.random_sample()
             else:
-                raise NotImplementedError('Search method {} is not implemetned'.format(self.search_method))
+                raise NotImplementedError('Search method {} is not implemented'.format(self.search_method))
         else:
             return obj
 
@@ -302,21 +312,23 @@ def train(*,
                                                                        eval_epochs=eval_epochs,
                                                                        checkpoint_suffix=checkpoint_suffix,
                                                                        model_format_string=model_format_string)
-    with Monitor(output_dir / 'logs') as monitor:
-        best_performance, best_model_path = training_loop(model=model,
-                                                          training_dataset=training_dataset,
-                                                          evaluation_dataset=evaluation_dataset,
-                                                          max_epochs=max_epochs,
-                                                          monitor=monitor,
-                                                          best_performance=best_performance,
-                                                          model_checkpoint_format=model_format_string,
-                                                          eval_time=eval_time,
-                                                          eval_iterations=eval_iterations,
-                                                          eval_epochs=eval_epochs,
-                                                          do_pre_eval=do_pre_eval,
-                                                          keep_snapshots=keep_snapshots)
-        return best_performance, best_model_path
-
+    try:
+        with Monitor(output_dir / 'logs') as monitor:
+            best_performance, best_model_path = training_loop(model=model,
+                                                              training_dataset=training_dataset,
+                                                              evaluation_dataset=evaluation_dataset,
+                                                              max_epochs=max_epochs,
+                                                              monitor=monitor,
+                                                              best_performance=best_performance,
+                                                              model_checkpoint_format=model_format_string,
+                                                              eval_time=eval_time,
+                                                              eval_iterations=eval_iterations,
+                                                              eval_epochs=eval_epochs,
+                                                              do_pre_eval=do_pre_eval,
+                                                              keep_snapshots=keep_snapshots)
+            return best_performance, best_model_path
+    except Exception as e:
+        raise TrainingError(metadata, "Error during training") from e
 
 def setup_training(*,
           model,

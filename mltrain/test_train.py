@@ -4,7 +4,8 @@ from pathlib import Path
 import numpy as np
 import time
 
-from mltrain.train import Monitor, train
+from mltrain.train import Monitor, train, HyperParameterManager, HyperParameterTrainer, DiscreteHyperParameter
+
 
 class DummyModel(object):
     def __init__(self):
@@ -59,3 +60,13 @@ class TestMonitor(unittest.TestCase):
                     monitor.log_one_now('validation error', validation_error)
                 monitor.tick()
             print("Total run time = {}".format(time.time() - t0))
+
+
+class TestHyperParameterManager(unittest.TestCase):
+    def test_hpmanager(self):
+        base_args = ('foo', 2, ('a', 'b', 'c'), DiscreteHyperParameter([3, 5]))
+        base_kwargs = {'baz': 'bar', 'asdf': DiscreteHyperParameter([True, False])}
+        hp_manager = HyperParameterManager(base_args=base_args, base_kwargs=base_kwargs)
+        args, kwargs = hp_manager.get_any_hyper_params()
+        print(hp_manager.get_any_hyper_params())
+        print(hp_manager.get_any_hyper_params())
