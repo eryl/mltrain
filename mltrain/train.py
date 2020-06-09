@@ -356,8 +356,8 @@ def setup_training(*,
     try:
         model_metadata = model.get_metadata()
         metadata['model_metadata'] = model_metadata
-        print("Model parameters are: ")
-        print('\n'.join(list(sorted('{}: {}'.format(k, v) for k, v in model_metadata.items()))))
+        #print("Model parameters are: ")
+        #print('\n'.join(list(sorted('{}: {}'.format(k, v) for k, v in model_metadata.items()))))
     except AttributeError:
         print("Couldn't get model parameters, skipping model_params for the metadata")
 
