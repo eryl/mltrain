@@ -1,31 +1,13 @@
 import copy
 import datetime
-import json
-import operator
-import time
-import sys
-import os
-import os.path
-import multiprocessing
-#import multiprocessing.dummy as multiprocessing
-import queue
-import gzip
-import unittest
-import signal
+import types
 from collections import defaultdict
 from pathlib import Path
-from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
 
 
 from tqdm import trange, tqdm
 import numpy as np
-
-
-def make_timestamp():
-    dt = datetime.datetime.now()
-    return dt.strftime("%Y-%m-%dT%H.%M.%S")  # We choose this format to make the filename compatible with windows environmnets
 
 
 class HyperParameter(object):
@@ -101,24 +83,42 @@ class GeometricHyperParameter(LinearHyperParameter):
         return np.power(10, sample)
 
 
+class MaterializeError(Exception):
+    def __init__(self, obj, message):
+        self.obj = obj
+        self.message = message
+
+    def __str__(self):
+        return f"{self.message}: {self.obj}"
+
+
 def materialize_hyper_parameters(obj, search_method='random', non_collection_types=(str, bytes, bytearray, np.ndarray)):
     """Make any HyperParameter a concrete object"""
-    if isinstance(obj, HyperParameter):
-        if search_method == 'random':
-            sample = obj.random_sample()
-            return materialize_hyper_parameters(sample)
+    try:
+        if isinstance(obj, (type, types.FunctionType, types.LambdaType, types.ModuleType)):
+            return obj
+        if isinstance(obj, HyperParameter):
+            if search_method == 'random':
+                sample = obj.random_sample()
+                return materialize_hyper_parameters(sample)
+            else:
+                raise NotImplementedError('Search method {} is not implemented'.format(search_method))
+        elif isinstance(obj, Mapping):
+            return type(obj)({k: materialize_hyper_parameters(v, search_method) for k, v in obj.items()})
+        elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
+            return type(obj)(materialize_hyper_parameters(x, search_method) for x in obj)
+        elif hasattr(obj, '__dict__'):
+            try:
+                obj_copy = copy.copy(obj)
+                obj_copy.__dict__ = materialize_hyper_parameters(obj.__dict__)
+                return obj_copy
+            except TypeError:
+                return obj
         else:
-            raise NotImplementedError('Search method {} is not implemented'.format(search_method))
-    elif isinstance(obj, Mapping):
-        return type(obj)((k, materialize_hyper_parameters(v, search_method)) for k, v in obj.items())
-    elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
-        return type(obj)(materialize_hyper_parameters(x, search_method) for x in obj)
-    elif hasattr(obj, '__dict__'):
-        obj_copy = copy.copy(obj)
-        obj_copy.__dict__ = materialize_hyper_parameters(obj.__dict__)
-        return obj_copy
-    else:
-        return obj
+            return obj
+    except TypeError as e:
+        raise MaterializeError(obj, "Failed to materialize") from e
+
 
 
 class HyperParameterManager(object):

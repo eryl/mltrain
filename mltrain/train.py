@@ -1,23 +1,19 @@
-import copy
 import datetime
 import json
-import operator
 import time
 import sys
 import os
 import os.path
 import multiprocessing
-#import multiprocessing.dummy as multiprocessing
-import queue
-import gzip
-import unittest
 import signal
 from collections import defaultdict
 from pathlib import Path
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from typing import Optional
 
+from mltrain.performance import setup_metrics
+from mltrain.monitor import Monitor
 
 from tqdm import trange, tqdm
 import numpy as np
@@ -120,258 +116,20 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
             train(model=model, **kwargs)
 
 
-class HyperParameter(object):
-    def __init__(self, rng=None):
-        if rng is None:
-            rng = np.random.RandomState()
-        self.rng = rng
-
-    def __repr__(self):
-        raise NotImplementedError()
-
-    def random_sample(self):
-        ...
-
-class IntegerRangeHyperParameter(HyperParameter):
-    def __init__(self, low, high=None, rng=None):
-        super().__init__(rng=rng)
-        if high is None:
-            high = low
-            low = 0
-        self.low = low
-        self.high = high
-        #self.current_item = low  # We'll see how we implement grid search, if it's done with an iterator this variable
-                                  # will not be needed
-    def __repr__(self):
-        return "<{} low:{},high:{}>".format(self.__class__.__name__, self.low, self.high)
-
-    def random_sample(self):
-        return self.rng.randint(self.low, self.high)
-
-
-class DiscreteHyperParameter(HyperParameter):
-    def __init__(self, values, rng=None):
-        super().__init__(rng=rng)
-        self.values = list(values)
-        self.current_item = 0
-
-    def random_sample(self):
-        return self.rng.choice(self.values)
-
-    def __repr__(self):
-        return "<{} values:{}>".format(self.__class__.__name__, self.values)
-
-
-class LinearHyperParameter(HyperParameter):
-    def __init__(self, low, high=None, num=None, rng=None):
-        super().__init__(rng=rng)
-        if high is None:
-            high = low
-            low = 0
-        self.low = low
-        self.high = high
-        self.num = num
-
-    def random_sample(self):
-        return (self.high - self.low) * self.rng.random_sample() + self.low
-
-    def __repr__(self):
-        return "<{} low:{},high:{},num:{}>".format(self.__class__.__name__, self.low, self.high, self.num)
-
-
-class GeometricHyperParameter(LinearHyperParameter):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.low = np.log10(self.low)
-        self.high = np.log10(self.high)
-
-    def random_sample(self):
-        # If we transform the space from low to high to a log-scale and then draw uniform samples in that space,
-        # by exponentiating them we should get the right value
-        sample = LinearHyperParameter.random_sample(self)
-        return np.power(10, sample)
-
-
-def materialize_hyper_parameters(obj, search_method='random', non_collection_types=(str, bytes, bytearray, np.ndarray)):
-    """Make any HyperParameter a concrete object"""
-    if isinstance(obj, HyperParameter):
-        if search_method == 'random':
-            sample = obj.random_sample()
-            return materialize_hyper_parameters(sample)
-        else:
-            raise NotImplementedError('Search method {} is not implemented'.format(search_method))
-    elif isinstance(obj, Mapping):
-        return type(obj)((k, materialize_hyper_parameters(v, search_method)) for k, v in obj.items())
-    elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
-        return type(obj)(materialize_hyper_parameters(x, search_method) for x in obj)
-    elif hasattr(obj, '__dict__'):
-        obj_copy = copy.copy(obj)
-        obj_copy.__dict__ = materialize_hyper_parameters(obj.__dict__)
-        return obj_copy
-    else:
-        return obj
-
-
-class HyperParameterManager(object):
-    def __init__(self, base_args, base_kwargs, search_method='random'):
-        self.base_args = base_args
-        self.base_kwargs = base_kwargs
-        self.search_method = search_method
-        self.search_space = []
-        self.hyper_parameters = dict()
-        self.history = defaultdict(list)
-        self.n_iter = 0
-        self.setup_search_space()
-
-    def setup_search_space(self):
-        # for i, arg in enumerate(self.base_args):
-        #     if isinstance(arg, HyperParameter):
-        #         self.search_space.append((arg, 'args', i))
-        # for k, v in self.base_kwargs.items():
-        #     if isinstance(v, HyperParameter):
-        #         self.search_space.append((v, 'kwargs', k))
-        pass
-
-    def get_hyper_parameters(self):
-        args = list(self.base_args)
-        kwargs = dict(self.base_kwargs.items())
-        self.n_iter += 1
-        hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
-                             # the hp-point produced
-        args = self.materialize_hyper_params(args)
-        kwargs = self.materialize_hyper_params(kwargs)
-        self.hyper_parameters[hp_id] = (args, kwargs)
-        return hp_id, args, kwargs
-
-    def report(self, hp_id, performance):
-        # The idea is that the manager can do things with this history. Since we will probably not have a lot of
-        # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
-        # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
-        # iterate over a list will be a small cost compared to evaluating each sample.
-        self.history[hp_id].append(performance)
-
-    def best_hyper_params(self):
-        best_performance = None
-        best_args = None
-        best_kwargs = None
-        for hp_id, performances in self.history.items():
-            for performance in performances:
-                if best_performance is None or performance.cmp(best_performance):
-                    best_performance = performance
-                    best_args, best_kwargs = self.hyper_parameters[hp_id]
-        return best_args, best_kwargs
-
-    def get_any_hyper_params(self):
-        hp_id, args, kwargs = self.get_hyper_parameters()
-        return args, kwargs
-
-
-class ObjectHyperParameterManager(object):
-    def __init__(self, base_obj, search_method='random'):
-        self.base_obj = base_obj
-        self.search_method = search_method
-        self.search_space = []
-        self.hyper_parameters = dict()
-        self.history = defaultdict(list)
-        self.n_iter = 0
-        self.setup_search_space()
-
-    def setup_search_space(self):
-        # for i, arg in enumerate(self.base_args):
-        #     if isinstance(arg, HyperParameter):
-        #         self.search_space.append((arg, 'args', i))
-        # for k, v in self.base_kwargs.items():
-        #     if isinstance(v, HyperParameter):
-        #         self.search_space.append((v, 'kwargs', k))
-        pass
-
-    def get_hyper_parameters(self):
-        materialized_obj = materialize_hyper_parameters(self.base_obj)
-        self.n_iter += 1
-        hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
-                             # the hp-point produced
-        self.hyper_parameters[hp_id] = materialized_obj
-        return hp_id, materialized_obj
-
-    def report(self, hp_id, performance):
-        # The idea is that the manager can do things with this history. Since we will probably not have a lot of
-        # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
-        # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
-        # iterate over a list will be a small cost compared to evaluating each sample.
-        self.history[hp_id].append(performance)
-
-    def best_hyper_params(self):
-        best_performance = None
-        best_args = None
-        best_kwargs = None
-        for hp_id, performances in self.history.items():
-            for performance in performances:
-                if best_performance is None or performance.cmp(best_performance):
-                    best_performance = performance
-                    best_args, best_kwargs = self.hyper_parameters[hp_id]
-        return best_args, best_kwargs
-
-    def get_any_hyper_params(self):
-        return self.get_hyper_parameters()
-
-    def get_next(self):
-        #TODO: This assumes random sampling for the moment
-        return self.get_hyper_parameters()
-
-
-
-class HyperParameterTrainer(object):
-    def __init__(self, *, base_model, base_args, base_kwargs,
-                 search_method='random'):
-        self.base_model = base_model
-        self.base_args = base_args
-        self.base_kwargs = base_kwargs
-        self.hp_manager = HyperParameterManager(base_args, base_kwargs,
-                                                search_method=search_method)
-        self.search_method = search_method
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        pass
-
-    def train(self, n, **train_kwargs):
-        try:
-            for i in trange(n, desc='Hyper parameter'):
-                    hp_id, args, kwargs = self.hp_manager.get_hyper_parameters()
-                    model = self.base_model(*args, **kwargs)
-                    performance, best_model_path = train(model=model,
-                                                         **train_kwargs)
-                    self.hp_manager.report(hp_id, performance)
-        except StopIteration:
-            return self.hp_manager.best_hyper_params()
-
-    def get_best_hyper_params(self):
-        return self.hp_manager.best_hyper_params()
-
-    def get_any_hyper_params(self):
-        return self.hp_manager.get_any_hyper_params()
-
-    def get_next(self):
-        pass
-
-
 @dataclass
 class TrainingConfig(object):
     max_epochs: int
-    output_dir: Path
-    keep_snapshots: bool = False,
-    eval_time: int = None,
-    eval_iterations: int = None,
-    eval_epochs: int = 1,
-    checkpoint_suffix: str = '.pkl',
-    model_format_string: str = None,
+    keep_snapshots: bool = False
+    eval_time: Optional[int] = None
+    eval_iterations: Optional[int] = None
+    eval_epochs: int = 1
+    model_format_string: Optional[str] = None
     do_pre_eval: bool = False
 
 
 def train(
         *,
+        output_dir,
         training_config,
         model,
         training_dataset,
@@ -381,6 +139,7 @@ def train(
     best_performance, model_format_string, output_dir = setup_training(model=model,
                                                                        training_config=training_config,
                                                                        metadata=metadata,
+                                                                       output_dir=output_dir,
                                                                        )
     try:
             best_performance, best_model_path = training_loop(model=model,
@@ -400,16 +159,18 @@ def setup_training(
         *,
         model,
         training_config,
+        output_dir,
         metadata=None):
 
-    if training_config.model_format_string is None:
-        model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}' + training_config.checkpoint_suffix
+    model_format_string = training_config.model_format_string
+    if model_format_string is None:
+        model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}'
 
-    output_dir = training_config.output_dir / make_timestamp()
+    output_dir = output_dir / make_timestamp()
     while output_dir.exists():
         time.sleep(1)
         output_dir = output_dir / make_timestamp()
-    model_format_string = output_dir / training_config.model_format_string
+    model_format_string = output_dir / model_format_string
     setup_directory(output_dir)
 
     if metadata is None:
@@ -430,116 +191,6 @@ def setup_training(
 
     best_performance = setup_metrics(model.evaluation_metrics())
     return best_performance, model_format_string, output_dir
-
-
-class EvaluationMetric(object):
-    def __init__(self, name):
-        self.name = name
-
-    def __hash__(self):
-        return hash(self.name)
-
-    def __eq__(self, other):
-        return self.name == other.name
-
-    def __str__(self):
-        return self.name
-
-    def cmp(self, a, b):
-        raise NotImplementedError()
-
-
-class HigherIsBetterMetric(EvaluationMetric):
-    def __init__(self, name):
-        super().__init__(name)
-        self.worst_value = -np.inf
-
-    def cmp(self, a, b):
-        return a > b
-
-
-class LowerIsBetterMetric(EvaluationMetric):
-    def __init__(self, name):
-        super().__init__(name)
-        self.worst_value = np.inf
-
-    def cmp(self, a, b):
-        return a < b
-
-
-class Performance(object):
-    def __init__(self, metric, value=None):
-        self.metric = metric
-        if value is None:
-            value = metric.worst_value
-        self.value = value
-
-    def cmp(self, other):
-        return self.metric.cmp(self.value, other.value)
-
-    def __str__(self):
-        return str(self.value)
-
-
-class PerformanceCollection(object):
-    def __init__(self, performances):
-        self.metrics = [p.metric for p in performances] # Keeps the order of the performance objects
-        self.performances = { p.metric:p for p in performances}
-
-    def cmp(self, other):
-        for metric in self.metrics:
-            performance = self.performances[metric]
-            other_performance = other.get_performance(metric)
-            if performance.cmp(other_performance):
-                # This performance is better than the other
-                return True
-            elif other_performance.cmp(performance):
-                # This performance is equal to the other, we need to look at the next metric
-                return False
-            else:
-                # This performance is worse than the other
-                continue
-        return True  # If two performance collections are exactly the same, we return this one as the better
-
-    def get_performance(self, metric):
-        return self.performances[metric]
-
-    def update(self, value_map):
-        """
-        Return a new PerformanceCollection where the metrics are updated according to the
-        values in the value map
-        :param value_map:
-        :return:
-        """
-        performances = [Performance(metric, value_map[metric.name]) for metric in self.metrics]
-        return PerformanceCollection(performances)
-
-    def get_metrics(self):
-        return self.metrics
-
-    def __str__(self):
-        return '_'.join('{}:{}'.format(metric.name, self.performances[metric].value) for metric in self.metrics)
-
-    def items(self):
-        yield from self.performances.items()
-
-
-def setup_metrics(evaluation_metrics):
-    base_performances = []
-    for evaluation_metric in evaluation_metrics:
-        if isinstance(evaluation_metric, str):
-            if 'loss' in evaluation_metric:
-                evaluation_metric = LowerIsBetterMetric(evaluation_metric)
-            elif 'accuracy' in evaluation_metric:
-                evaluation_metric = HigherIsBetterMetric(evaluation_metric)
-            else:
-                raise RuntimeError(
-                    "Metric {} is not implemented, please supply an EvaluationMetric object instead.".format(evaluation_metric))
-        if isinstance(evaluation_metric, EvaluationMetric):
-            base_performance = Performance(evaluation_metric)
-            base_performances.append(base_performance)
-    best_performance = PerformanceCollection(base_performances)
-    return best_performance
 
 
 def training_loop(
@@ -691,9 +342,8 @@ def checkpoint(model,
     checkpoint_path = checkpoint_format.with_name(model_name).resolve()
     model_directory.mkdir(exist_ok=True)
     model.save(checkpoint_path)
-    model_suffix = checkpoint_path.suffix
-    latest_model_symlink = (model_directory / latest_model_name).with_suffix(model_suffix)
-    best_model_symlink = (model_directory / best_model_name).with_suffix(model_suffix)
+    latest_model_symlink = model_directory / latest_model_name
+    best_model_symlink = model_directory / best_model_name
 
     if remove_models and latest_model_symlink.exists():
         latest_model = latest_model_symlink.resolve(strict=True)
@@ -725,114 +375,6 @@ def checkpoint(model,
     return best_model_symlink.resolve()
 
 
-class Monitor(object):
-    def __init__(self, monitor_dir, save_interval=20, buffer_size=100):
-        original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        self.channel_values = multiprocessing.Queue(maxsize=100)
-        self.save_interval = save_interval
-        self.buffer_size = buffer_size
-        self.monitor_process = MonitorProcess(monitor_dir,
-                                              self.channel_values,
-                                              buffer_size=buffer_size,
-                                              save_interval=save_interval)
-        self.monitor_process.start()
-        signal.signal(signal.SIGINT, original_sigint_handler)
-        self.time = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.monitor_process.exit.set()
-        print("Waiting for monitor process to exit cleanly")
-        self.monitor_process.join()
-        print("Monitor exiting")
-
-    def tick(self):
-        """
-        Progress the time one step.
-        """
-        self.time += 1
-
-    def log_now(self, values):
-        for channel_name, value in values.items():
-            update_command = (self.time, channel_name, value)
-            self.channel_values.put(update_command)
-
-    def log_one_now(self, channel, value):
-        update_command = (self.time, channel, value)
-        self.channel_values.put(update_command)
-
-
-class MonitorProcess(multiprocessing.Process):
-    def __init__(self, store_directory, command_queue, *args, buffer_size=100, save_interval=None, compress_log=False, **kwargs):
-        super(MonitorProcess, self).__init__(*args, **kwargs)
-        self.store_directory = store_directory
-        if not os.path.exists(store_directory):
-            os.makedirs(store_directory)
-        self.channel_files = dict()
-        self.command_queue = command_queue
-        self.buffer_size = buffer_size
-        self.channels = defaultdict(list)
-        self.save_interval = save_interval
-        self.compress_log = compress_log
-        if save_interval is not None:
-            self.tm1 = time.time()
-        self.exit = multiprocessing.Event()
-
-    def run(self):
-        while not self.exit.is_set():
-            try:
-                command = self.command_queue.get(False, 10)
-                self.update_channel(command)
-            except queue.Empty:
-                pass
-            if self.save_interval is not None and time.time() - self.tm1 < self.save_interval:
-                self.flush_caches()
-                self.tm1 = time.time()
-        # If exit is set, still empty the queue before quitting
-        while True:
-            try:
-                command = self.command_queue.get(False)
-                self.update_channel(command)
-            except queue.Empty:
-                break
-        self.flush_caches()
-        print("Monitor process is exiting")
-        self.close()
-
-    def update_channel(self, command):
-        t, channel_name, channel_value = command
-        self.channels[channel_name].append((t, channel_value))
-        if len(self.channels[channel_name]) >= self.buffer_size:
-            self.flush_cache(channel_name)
-
-    def flush_caches(self):
-        for channel_name in self.channels.keys():
-            self.flush_cache(channel_name)
-
-    def flush_cache(self, channel_name):
-        #print("Flushing cache for channel {}".format(channel_name))
-        if len(self.channels[channel_name]) > 0:
-            if channel_name not in self.channel_files:
-                channel_file_name = os.path.join(self.store_directory, channel_name + '.txt')
-                if self.compress_log:
-                    channel_file_name += '.gz'
-                    channel_file = gzip.open(channel_file_name, 'w')
-                else:
-                    channel_file = open(channel_file_name, 'w')
-                self.channel_files[channel_name] = channel_file
-            else:
-                channel_file = self.channel_files[channel_name]
-            data = ''.join(['{} {}\n'.format(time, value) for time, value in self.channels[channel_name]])
-            channel_file.write(data)
-            channel_file.flush()
-            self.channels[channel_name].clear()
-        #print("Done flushing cache")
-
-    def close(self):
-        for channel_name, channel_file in self.channel_files.items():
-            channel_file.close()
 
 
 def add_parser_args(parser):
