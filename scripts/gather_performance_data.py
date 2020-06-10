@@ -1,5 +1,7 @@
 import argparse
+import collections
 from collections import defaultdict
+from collections.abc import MutableMapping
 from pathlib import Path
 import json
 import re
@@ -28,8 +30,8 @@ def main():
             with open(metadata_file) as fp:
                 metadata = json.load(fp)
             experiment_data = dict()
-            model_kwargs = metadata['model_metadata']['kwargs']
-            for kwarg, value in model_kwargs.items():
+            model_variables = flatten(metadata['model_metadata'])
+            for kwarg, value in model_variables.items():
                 experiment_data[kwarg] = value
                 model_kwarg_names.add(kwarg)
             log_dir = metadata_file.with_name('logs')
@@ -54,6 +56,15 @@ def main():
         csv_writer.writeheader()
         csv_writer.writerows(data)
 
+def flatten(d, parent_key='', sep='_'):
+    items = []
+    for k, v in d.items():
+        new_key = parent_key + sep + k if parent_key else k
+        if isinstance(v, MutableMapping):
+            items.extend(flatten(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 if __name__ == '__main__':
     main()

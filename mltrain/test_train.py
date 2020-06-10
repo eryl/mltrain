@@ -1,10 +1,12 @@
 import unittest
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Dict, Any, Tuple
 
 import numpy as np
 import time
 
-from mltrain.train import Monitor, train, HyperParameterManager, HyperParameterTrainer, DiscreteHyperParameter
+from mltrain.train import Monitor, train, HyperParameterManager, HyperParameterTrainer, DiscreteHyperParameter, ObjectHyperParameterManager, materialize_hyper_parameters
 
 
 class DummyModel(object):
@@ -70,3 +72,34 @@ class TestHyperParameterManager(unittest.TestCase):
         args, kwargs = hp_manager.get_any_hyper_params()
         print(hp_manager.get_any_hyper_params())
         print(hp_manager.get_any_hyper_params())
+
+@dataclass
+class HyperParameterTest(object):
+    base_args: Tuple
+    base_kwargs: Dict
+    extra: Any
+
+class TestModel(object):
+    def __init__(self):
+        self.foo = DiscreteHyperParameter([1,2,3, 'foo'])
+        self.bar = DiscreteHyperParameter(['bar', False])
+        self.asdf = DiscreteHyperParameter(['asdf'])
+
+    def __str__(self):
+        return f"<TestModel>(foo={self.foo}, bar={self.bar}, asdf={self.asdf})"
+
+    def __repr__(self):
+        return str(self)
+
+class TestHyperParameterMaterialization(unittest.TestCase):
+    def test_materialize_hyper_parameters(self):
+        base_args = ('foo', 2, ('a', 'b', 'c'), DiscreteHyperParameter([3, 5]))
+        base_kwargs = {'baz': 'bar', 'asdf': DiscreteHyperParameter([True, False])}
+
+        for i in range(5):
+            print(materialize_hyper_parameters(dict(base_args=base_args,
+                                                    base_kwargs=base_kwargs)))
+
+        hp_obj = HyperParameterTest(base_args=base_args, base_kwargs=base_kwargs, extra=TestModel())
+        for i in range(10):
+            print(materialize_hyper_parameters(hp_obj))

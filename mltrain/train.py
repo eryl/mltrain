@@ -1,3 +1,4 @@
+import copy
 import datetime
 import json
 import operator
@@ -15,9 +16,12 @@ from collections import defaultdict
 from pathlib import Path
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+
 
 from tqdm import trange, tqdm
 import numpy as np
+
 
 class BaseModel(ABC):
     @abstractmethod
@@ -188,6 +192,26 @@ class GeometricHyperParameter(LinearHyperParameter):
         return np.power(10, sample)
 
 
+def materialize_hyper_parameters(obj, search_method='random', non_collection_types=(str, bytes, bytearray, np.ndarray)):
+    """Make any HyperParameter a concrete object"""
+    if isinstance(obj, HyperParameter):
+        if search_method == 'random':
+            sample = obj.random_sample()
+            return materialize_hyper_parameters(sample)
+        else:
+            raise NotImplementedError('Search method {} is not implemented'.format(search_method))
+    elif isinstance(obj, Mapping):
+        return type(obj)((k, materialize_hyper_parameters(v, search_method)) for k, v in obj.items())
+    elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
+        return type(obj)(materialize_hyper_parameters(x, search_method) for x in obj)
+    elif hasattr(obj, '__dict__'):
+        obj_copy = copy.copy(obj)
+        obj_copy.__dict__ = materialize_hyper_parameters(obj.__dict__)
+        return obj_copy
+    else:
+        return obj
+
+
 class HyperParameterManager(object):
     def __init__(self, base_args, base_kwargs, search_method='random'):
         self.base_args = base_args
@@ -226,20 +250,6 @@ class HyperParameterManager(object):
         # iterate over a list will be a small cost compared to evaluating each sample.
         self.history[hp_id].append(performance)
 
-    def materialize_hyper_params(self, obj):
-        """Make any HyperParameter a concrete object"""
-        if isinstance(obj, Mapping):
-            return type(obj)((k, self.materialize_hyper_params(v)) for k, v in obj.items())
-        elif isinstance(obj, Collection) and not isinstance(obj, (str, bytes, bytearray, np.ndarray)):
-            return type(obj)(self.materialize_hyper_params(x) for x in obj)
-        elif isinstance(obj, HyperParameter):
-            if self.search_method == 'random':
-                return obj.random_sample()
-            else:
-                raise NotImplementedError('Search method {} is not implemented'.format(self.search_method))
-        else:
-            return obj
-
     def best_hyper_params(self):
         best_performance = None
         best_args = None
@@ -254,6 +264,60 @@ class HyperParameterManager(object):
     def get_any_hyper_params(self):
         hp_id, args, kwargs = self.get_hyper_parameters()
         return args, kwargs
+
+
+class ObjectHyperParameterManager(object):
+    def __init__(self, base_obj, search_method='random'):
+        self.base_obj = base_obj
+        self.search_method = search_method
+        self.search_space = []
+        self.hyper_parameters = dict()
+        self.history = defaultdict(list)
+        self.n_iter = 0
+        self.setup_search_space()
+
+    def setup_search_space(self):
+        # for i, arg in enumerate(self.base_args):
+        #     if isinstance(arg, HyperParameter):
+        #         self.search_space.append((arg, 'args', i))
+        # for k, v in self.base_kwargs.items():
+        #     if isinstance(v, HyperParameter):
+        #         self.search_space.append((v, 'kwargs', k))
+        pass
+
+    def get_hyper_parameters(self):
+        materialized_obj = materialize_hyper_parameters(self.base_obj)
+        self.n_iter += 1
+        hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
+                             # the hp-point produced
+        self.hyper_parameters[hp_id] = materialized_obj
+        return hp_id, materialized_obj
+
+    def report(self, hp_id, performance):
+        # The idea is that the manager can do things with this history. Since we will probably not have a lot of
+        # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
+        # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
+        # iterate over a list will be a small cost compared to evaluating each sample.
+        self.history[hp_id].append(performance)
+
+    def best_hyper_params(self):
+        best_performance = None
+        best_args = None
+        best_kwargs = None
+        for hp_id, performances in self.history.items():
+            for performance in performances:
+                if best_performance is None or performance.cmp(best_performance):
+                    best_performance = performance
+                    best_args, best_kwargs = self.hyper_parameters[hp_id]
+        return best_args, best_kwargs
+
+    def get_any_hyper_params(self):
+        return self.get_hyper_parameters()
+
+    def get_next(self):
+        #TODO: This assumes random sampling for the moment
+        return self.get_hyper_parameters()
+
 
 
 class HyperParameterTrainer(object):
@@ -289,66 +353,63 @@ class HyperParameterTrainer(object):
     def get_any_hyper_params(self):
         return self.hp_manager.get_any_hyper_params()
 
-def train(*,
-          model,
-          training_dataset,
-          evaluation_dataset,
-          max_epochs,
-          output_dir: Path,
-          metadata=None,
-          keep_snapshots=False,
-          eval_time=None,
-          eval_iterations=None,
-          eval_epochs=1,
-          checkpoint_suffix='.pkl',
-          model_format_string=None,
-          do_pre_eval=False):
+    def get_next(self):
+        pass
+
+
+@dataclass
+class TrainingConfig(object):
+    max_epochs: int
+    output_dir: Path
+    keep_snapshots: bool = False,
+    eval_time: int = None,
+    eval_iterations: int = None,
+    eval_epochs: int = 1,
+    checkpoint_suffix: str = '.pkl',
+    model_format_string: str = None,
+    do_pre_eval: bool = False
+
+
+def train(
+        *,
+        training_config,
+        model,
+        training_dataset,
+        evaluation_dataset,
+        metadata=None,
+):
     best_performance, model_format_string, output_dir = setup_training(model=model,
-                                                                       output_dir=output_dir,
+                                                                       training_config=training_config,
                                                                        metadata=metadata,
-                                                                       keep_snapshots=keep_snapshots,
-                                                                       eval_time=eval_time,
-                                                                       eval_iterations=eval_iterations,
-                                                                       eval_epochs=eval_epochs,
-                                                                       checkpoint_suffix=checkpoint_suffix,
-                                                                       model_format_string=model_format_string)
+                                                                       )
     try:
-        with Monitor(output_dir / 'logs') as monitor:
             best_performance, best_model_path = training_loop(model=model,
                                                               training_dataset=training_dataset,
                                                               evaluation_dataset=evaluation_dataset,
-                                                              max_epochs=max_epochs,
-                                                              monitor=monitor,
+                                                              training_config=training_config,
                                                               best_performance=best_performance,
                                                               model_checkpoint_format=model_format_string,
-                                                              eval_time=eval_time,
-                                                              eval_iterations=eval_iterations,
-                                                              eval_epochs=eval_epochs,
-                                                              do_pre_eval=do_pre_eval,
-                                                              keep_snapshots=keep_snapshots)
+                                                              output_dir=output_dir
+                                                              )
             return best_performance, best_model_path
     except Exception as e:
         raise TrainingError(metadata, "Error during training") from e
 
-def setup_training(*,
-          model,
-          output_dir: Path,
-          metadata=None,
-          keep_snapshots=False,
-          eval_time=None,
-          eval_iterations=None,
-          eval_epochs=1,
-          checkpoint_suffix='.pkl',
-          model_format_string=None):
-    if model_format_string is None:
-        model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}' + checkpoint_suffix
 
-    output_dir = output_dir / make_timestamp()
+def setup_training(
+        *,
+        model,
+        training_config,
+        metadata=None):
+
+    if training_config.model_format_string is None:
+        model_format_string = model.__class__.__name__ + '_epoch-{epoch:.04f}_{metrics}' + training_config.checkpoint_suffix
+
+    output_dir = training_config.output_dir / make_timestamp()
     while output_dir.exists():
         time.sleep(1)
         output_dir = output_dir / make_timestamp()
-    model_format_string = output_dir / model_format_string
-
+    model_format_string = output_dir / training_config.model_format_string
     setup_directory(output_dir)
 
     if metadata is None:
@@ -361,13 +422,7 @@ def setup_training(*,
     except AttributeError:
         print("Couldn't get model parameters, skipping model_params for the metadata")
 
-    training_params = dict(eval_time=eval_time,
-                           eval_iterations=eval_iterations,
-                           eval_epochs=eval_epochs,
-                           model_format_string=model_format_string,
-                           output_dir=output_dir,
-                           keep_snapshots=keep_snapshots)
-    metadata['training_params'] = training_params
+    metadata['training_params'] = training_config
 
     json_encoder = JSONEncoder(sort_keys=True, indent=4, separators=(',', ': '))
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as metadata_fp:
@@ -468,6 +523,7 @@ class PerformanceCollection(object):
     def items(self):
         yield from self.performances.items()
 
+
 def setup_metrics(evaluation_metrics):
     base_performances = []
     for evaluation_metric in evaluation_metrics:
@@ -486,19 +542,16 @@ def setup_metrics(evaluation_metrics):
     return best_performance
 
 
-def training_loop(*,
-                  model,
-                  training_dataset,
-                  evaluation_dataset,
-                  max_epochs,
-                  monitor,
-                  best_performance,
-                  model_checkpoint_format,
-                  eval_time=None,
-                  eval_iterations=None,
-                  eval_epochs=1,
-                  do_pre_eval=True,
-                  keep_snapshots=False):
+def training_loop(
+        *,
+        model,
+        training_dataset,
+        evaluation_dataset,
+        training_config,
+        best_performance,
+        model_checkpoint_format,
+        output_dir
+):
 
     epoch = 0
     best_model_path = None
@@ -509,50 +562,63 @@ def training_loop(*,
     signal.signal(signal.SIGINT, sigint_handler)
 
     # Since we call evaluate_models from som many places below, we summarize the common arguments in a dict
-    eval_kwargs = dict(model=model,
-                       evaluation_dataset=evaluation_dataset,
-                       model_checkpoint_format=model_checkpoint_format,
-                       monitor=monitor,
-                       keep_snapshots=keep_snapshots)
-    # These variables will be used to control when to do evaluation
-    eval_timestamp = time.time()
-    eval_epoch = 0
-    eval_iteration = 0
-    needs_final_eval = True
 
-    if do_pre_eval:
-        best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
+    with Monitor(output_dir / 'logs') as monitor:
+        eval_kwargs = dict(model=model,
+                           evaluation_dataset=evaluation_dataset,
+                           model_checkpoint_format=model_checkpoint_format,
+                           monitor=monitor,
+                           keep_snapshots=training_config.keep_snapshots)
+        if training_config.do_pre_eval:
+            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
 
-    for epoch in trange(max_epochs, desc='Epochs'):
-        ## This is the main training loop
-        for i, batch in enumerate(tqdm(training_dataset, desc='Training batch')):
-            needs_final_eval = True
-            epoch_fraction = epoch + i / len(training_dataset)
-            training_results = model.fit(batch)
-            monitor.log_one_now('epoch', epoch_fraction)
-            if training_results is not None:
-                monitor.log_now(training_results)
+        # These variables will be used to control when to do evaluation
+        eval_timestamp = time.time()
+        eval_epoch = 0
+        eval_iteration = 0
+        needs_final_eval = True
 
-            # eval_time and eval_iterations allow the user to control how often to run evaluations
-            eval_time_dt = time.time() - eval_timestamp
-            eval_iteration += 1
+        for epoch in trange(training_config.max_epochs, desc='Epochs'):
+            ## This is the main training loop
+            for i, batch in enumerate(tqdm(training_dataset, desc='Training batch')):
+                needs_final_eval = True
+                epoch_fraction = epoch + i / len(training_dataset)
+                training_results = model.fit(batch)
+                monitor.log_one_now('epoch', epoch_fraction)
+                if training_results is not None:
+                    monitor.log_now(training_results)
 
-            if ((eval_time is not None and eval_time > 0 and eval_time_dt >= eval_time) or
-                (eval_iterations is not None and eval_iterations > 0 and eval_iteration >= eval_iterations)):
-                best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
-                eval_timestamp = time.time()
-                eval_iteration = 0
+                # eval_time and eval_iterations allow the user to control how often to run evaluations
+                eval_time_dt = time.time() - eval_timestamp
+                eval_iteration += 1
+
+                if (
+                        (training_config.eval_time is not None
+                         and training_config.eval_time > 0
+                         and eval_time_dt >= training_config.eval_time)
+                        or
+                        (training_config.eval_iterations is not None
+                         and training_config.eval_iterations > 0
+                         and eval_iteration >= training_config.eval_iterations)
+                ):
+                    best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
+                    eval_timestamp = time.time()
+                    eval_iteration = 0
+                    needs_final_eval = False
+
+                monitor.tick()
+                # End of training loop
+
+            eval_epoch += 1
+            if (
+                    training_config.eval_epochs is not None
+                    and training_config.eval_epochs > 0
+                    and eval_epoch >= training_config.eval_epochs
+            ):
+                best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
+                eval_epoch = 0
                 needs_final_eval = False
-
-            monitor.tick()
-            # End of training loop
-
-        eval_epoch += 1
-        if (eval_epochs is not None and eval_epochs > 0 and eval_epoch >= eval_epochs):
-            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
-            eval_epoch = 0
-            needs_final_eval = False
-        # End of epoch
+            # End of epoch
 
     # Done with the whole training loop. If we ran the evaluate_model at the end of the last epoch, we shouldn't do
     # it again
