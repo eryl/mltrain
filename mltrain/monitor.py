@@ -28,9 +28,9 @@ class Monitor(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.monitor_process.exit.set()
-        print("Waiting for monitor process to exit cleanly")
+        #print("Waiting for monitor process to exit cleanly")
         self.monitor_process.join()
-        print("Monitor exiting")
+        #print("Monitor exiting")
 
     def tick(self):
         """
@@ -82,7 +82,7 @@ class MonitorProcess(multiprocessing.Process):
             except queue.Empty:
                 break
         self.flush_caches()
-        print("Monitor process is exiting")
+        #print("Monitor process is exiting")
         self.close()
 
     def update_channel(self, command):
