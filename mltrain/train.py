@@ -1,3 +1,4 @@
+import copy
 import datetime
 import json
 import time
@@ -6,11 +7,13 @@ import os
 import os.path
 import multiprocessing
 import signal
+import pickle
 from collections import defaultdict
 from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any, Iterable, Dict
+from dataclasses import is_dataclass
 
 from mltrain.performance import setup_metrics
 from mltrain.monitor import Monitor
@@ -44,6 +47,11 @@ class BaseModel(ABC):
 class JSONEncoder(json.JSONEncoder):
     "Custom JSONEncoder which tries to encode filed types (like pathlib Paths) as strings"
     def default(self, o):
+        if is_dataclass(o):
+            attributes = copy.copy(o.__dict__)
+            attributes['dataclass_name'] = o.__class__.__name__
+            attributes['dataclass_module'] = o.__module__
+            return attributes
         try:
             return json.JSONEncoder.default(self, o)
         except TypeError:
@@ -118,7 +126,7 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
 
 @dataclass
 class TrainingConfig(object):
-    max_epochs: int
+    max_epochs: int = 1
     keep_snapshots: bool = False
     eval_time: Optional[int] = None
     eval_iterations: Optional[int] = None
@@ -126,26 +134,37 @@ class TrainingConfig(object):
     model_format_string: Optional[str] = None
     do_pre_eval: bool = False
 
+@dataclass
+class TrainingArguments(object):
+    model: BaseModel
+    output_dir: Path
+    training_dataset: Iterable
+    evaluation_dataset: Iterable
+    training_config: TrainingConfig
+    metadata: Optional[Dict] = None
+    artifacts: Optional[Dict] = None
+
 
 def train(
         *,
-        output_dir,
-        training_config,
-        model,
-        training_dataset,
-        evaluation_dataset,
-        metadata=None,
-):
+        training_args: TrainingArguments):
+    model = training_args.model
+    metadata = training_args.metadata
+    output_dir = training_args.output_dir
+    training_dataset = training_args.training_dataset
+    evaluation_dataset = training_args.evaluation_dataset
+
     best_performance, model_format_string, output_dir = setup_training(model=model,
-                                                                       training_config=training_config,
+                                                                       training_config=training_args.training_config,
                                                                        metadata=metadata,
+                                                                       artifacts=training_args.artifacts,
                                                                        output_dir=output_dir,
                                                                        )
     try:
             best_performance, best_model_path = training_loop(model=model,
                                                               training_dataset=training_dataset,
                                                               evaluation_dataset=evaluation_dataset,
-                                                              training_config=training_config,
+                                                              training_config=training_args.training_config,
                                                               best_performance=best_performance,
                                                               model_checkpoint_format=model_format_string,
                                                               output_dir=output_dir
@@ -160,6 +179,7 @@ def setup_training(
         model,
         training_config,
         output_dir,
+        artifacts=None,
         metadata=None):
 
     model_format_string = training_config.model_format_string
@@ -173,6 +193,10 @@ def setup_training(
     model_format_string = output_dir / model_format_string
     setup_directory(output_dir)
 
+    if artifacts is not None:
+        for k, v in artifacts.items():
+            with open(output_dir / k, 'wb') as fp:
+                pickle.dump(v, fp)
     if metadata is None:
         metadata = dict()
     try:
@@ -187,7 +211,8 @@ def setup_training(
 
     json_encoder = JSONEncoder(sort_keys=True, indent=4, separators=(',', ': '))
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as metadata_fp:
-        metadata_fp.write(json_encoder.encode(metadata))
+        json_encoding = json_encoder.encode(metadata)
+        metadata_fp.write(json_encoding)
 
     best_performance = setup_metrics(model.evaluation_metrics())
     return best_performance, model_format_string, output_dir
@@ -341,7 +366,7 @@ def checkpoint(model,
     model_name = checkpoint_format.name.format(epoch=epoch, metrics=performances)
     checkpoint_path = checkpoint_format.with_name(model_name).resolve()
     model_directory.mkdir(exist_ok=True)
-    model.save(checkpoint_path)
+    checkpoint_path = model.save(checkpoint_path)
     latest_model_symlink = model_directory / latest_model_name
     best_model_symlink = model_directory / best_model_name
 
@@ -393,3 +418,9 @@ def add_parser_args(parser):
     parser.add_argument('--keep-snapshots', help="If flag is set, all snapshots will be kept. otherwise only the best and the latest are kept.",
                         action='store_true')
 
+
+if __name__ == '__main__':
+    conf = TrainingConfig()
+    foo = dict(a=1, b=2, c=[1,2,3])
+    json_encoder = JSONEncoder(sort_keys=True, indent=4, separators=(',', ': '))
+    json_encoder.encode(conf)

@@ -4,28 +4,25 @@ import types
 from collections import defaultdict
 from pathlib import Path
 from collections.abc import Collection, Mapping
+from typing import Callable, Any
 
+from mltrain.train import train, TrainingConfig, TrainingArguments
 
 from tqdm import trange, tqdm
 import numpy as np
 
 
 class HyperParameter(object):
-    def __init__(self, rng=None):
-        if rng is None:
-            rng = np.random.RandomState()
-        self.rng = rng
-
     def __repr__(self):
         raise NotImplementedError()
 
-    def random_sample(self):
+    def random_sample(self, rng=None):
         ...
 
 
 class IntegerRangeHyperParameter(HyperParameter):
-    def __init__(self, low, high=None, rng=None):
-        super().__init__(rng=rng)
+    def __init__(self, low, high=None):
+        super().__init__()
         if high is None:
             high = low
             low = 0
@@ -36,26 +33,30 @@ class IntegerRangeHyperParameter(HyperParameter):
     def __repr__(self):
         return "<{} low:{},high:{}>".format(self.__class__.__name__, self.low, self.high)
 
-    def random_sample(self):
-        return self.rng.randint(self.low, self.high)
+    def random_sample(self, rng=None):
+        if rng is None:
+            rng = np.random.RandomState()
+        return rng.randint(self.low, self.high)
 
 
 class DiscreteHyperParameter(HyperParameter):
-    def __init__(self, values, rng=None):
-        super().__init__(rng=rng)
+    def __init__(self, values):
+        super().__init__()
         self.values = list(values)
         self.current_item = 0
 
-    def random_sample(self):
-        return self.rng.choice(self.values)
+    def random_sample(self, rng=None):
+        if rng is None:
+            rng = np.random.RandomState()
+        return rng.choice(self.values)
 
     def __repr__(self):
         return "<{} values:{}>".format(self.__class__.__name__, self.values)
 
 
 class LinearHyperParameter(HyperParameter):
-    def __init__(self, low, high=None, num=None, rng=None):
-        super().__init__(rng=rng)
+    def __init__(self, low, high=None, num=None):
+        super().__init__()
         if high is None:
             high = low
             low = 0
@@ -63,8 +64,10 @@ class LinearHyperParameter(HyperParameter):
         self.high = high
         self.num = num
 
-    def random_sample(self):
-        return (self.high - self.low) * self.rng.random_sample() + self.low
+    def random_sample(self, rng=None):
+        if rng is None:
+            rng = np.random.RandomState()
+        return (self.high - self.low) * rng.random_sample() + self.low
 
     def __repr__(self):
         return "<{} low:{},high:{},num:{}>".format(self.__class__.__name__, self.low, self.high, self.num)
@@ -76,10 +79,10 @@ class GeometricHyperParameter(LinearHyperParameter):
         self.low = np.log10(self.low)
         self.high = np.log10(self.high)
 
-    def random_sample(self):
+    def random_sample(self, rng=None):
         # If we transform the space from low to high to a log-scale and then draw uniform samples in that space,
         # by exponentiating them we should get the right value
-        sample = LinearHyperParameter.random_sample(self)
+        sample = LinearHyperParameter.random_sample(self, rng=rng)
         return np.power(10, sample)
 
 
@@ -92,93 +95,16 @@ class MaterializeError(Exception):
         return f"{self.message}: {self.obj}"
 
 
-def materialize_hyper_parameters(obj, search_method='random', non_collection_types=(str, bytes, bytearray, np.ndarray)):
-    """Make any HyperParameter a concrete object"""
-    try:
-        if isinstance(obj, (type, types.FunctionType, types.LambdaType, types.ModuleType)):
-            return obj
-        if isinstance(obj, HyperParameter):
-            if search_method == 'random':
-                sample = obj.random_sample()
-                return materialize_hyper_parameters(sample)
-            else:
-                raise NotImplementedError('Search method {} is not implemented'.format(search_method))
-        elif isinstance(obj, Mapping):
-            return type(obj)({k: materialize_hyper_parameters(v, search_method) for k, v in obj.items()})
-        elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
-            return type(obj)(materialize_hyper_parameters(x, search_method) for x in obj)
-        elif hasattr(obj, '__dict__'):
-            try:
-                obj_copy = copy.copy(obj)
-                obj_copy.__dict__ = materialize_hyper_parameters(obj.__dict__)
-                return obj_copy
-            except TypeError:
-                return obj
-        else:
-            return obj
-    except TypeError as e:
-        raise MaterializeError(obj, "Failed to materialize") from e
-
-
-
 class HyperParameterManager(object):
-    def __init__(self, base_args, base_kwargs, search_method='random'):
-        self.base_args = base_args
-        self.base_kwargs = base_kwargs
-        self.search_method = search_method
-        self.search_space = []
-        self.hyper_parameters = dict()
-        self.history = defaultdict(list)
-        self.n_iter = 0
-        self.setup_search_space()
-
-    def setup_search_space(self):
-        # for i, arg in enumerate(self.base_args):
-        #     if isinstance(arg, HyperParameter):
-        #         self.search_space.append((arg, 'args', i))
-        # for k, v in self.base_kwargs.items():
-        #     if isinstance(v, HyperParameter):
-        #         self.search_space.append((v, 'kwargs', k))
-        pass
-
-    def get_hyper_parameters(self):
-        args = list(self.base_args)
-        kwargs = dict(self.base_kwargs.items())
-        self.n_iter += 1
-        hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
-                             # the hp-point produced
-        args = self.materialize_hyper_params(args)
-        kwargs = self.materialize_hyper_params(kwargs)
-        self.hyper_parameters[hp_id] = (args, kwargs)
-        return hp_id, args, kwargs
-
-    def report(self, hp_id, performance):
-        # The idea is that the manager can do things with this history. Since we will probably not have a lot of
-        # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
-        # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
-        # iterate over a list will be a small cost compared to evaluating each sample.
-        self.history[hp_id].append(performance)
-
-    def best_hyper_params(self):
-        best_performance = None
-        best_args = None
-        best_kwargs = None
-        for hp_id, performances in self.history.items():
-            for performance in performances:
-                if best_performance is None or performance.cmp(best_performance):
-                    best_performance = performance
-                    best_args, best_kwargs = self.hyper_parameters[hp_id]
-        return best_args, best_kwargs
-
-    def get_any_hyper_params(self):
-        hp_id, args, kwargs = self.get_hyper_parameters()
-        return args, kwargs
-
-
-class ObjectHyperParameterManager(object):
-    def __init__(self, base_obj, search_method='random'):
+    def __init__(self, base_obj, search_method='random', n=None, rng=None):
+        if rng is None:
+            rng = np.random.RandomState()
+        self.rng = rng
         self.base_obj = base_obj
         self.search_method = search_method
+        if search_method == 'random' and n is None:
+            raise ValueError("When random search is specified, number of iterations must be set")
+        self.n = n
         self.search_space = []
         self.hyper_parameters = dict()
         self.history = defaultdict(list)
@@ -194,31 +120,61 @@ class ObjectHyperParameterManager(object):
         #         self.search_space.append((v, 'kwargs', k))
         pass
 
+    def materialize_hyper_parameters(self,
+                                     obj):
+        """Make any HyperParameter a concrete object"""
+        non_collection_types = (str, bytes, bytearray, np.ndarray)
+        try:
+            if isinstance(obj, (type, types.FunctionType, types.LambdaType, types.ModuleType)):
+                return obj
+            if isinstance(obj, HyperParameter):
+                if self.search_method == 'random':
+                    sample = obj.random_sample(self.rng)
+                    return self.materialize_hyper_parameters(sample)
+                else:
+                    raise NotImplementedError('Search method {} is not implemented'.format(self.search_method))
+            elif isinstance(obj, Mapping):
+                return type(obj)({k: self.materialize_hyper_parameters(v) for k, v in obj.items()})
+            elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
+                return type(obj)(self.materialize_hyper_parameters(x) for x in obj)
+            elif hasattr(obj, '__dict__'):
+                try:
+                    obj_copy = copy.copy(obj)
+                    obj_copy.__dict__ = self.materialize_hyper_parameters(obj.__dict__)
+                    return obj_copy
+                except TypeError:
+                    return obj
+            else:
+                return obj
+        except TypeError as e:
+            raise MaterializeError(obj, "Failed to materialize") from e
+
     def get_hyper_parameters(self):
-        materialized_obj = materialize_hyper_parameters(self.base_obj)
+        materialized_obj = self.materialize_hyper_parameters(self.base_obj)
         self.n_iter += 1
         hp_id = self.n_iter  ## When we implement smarter search methods, this should be a reference to
                              # the hp-point produced
         self.hyper_parameters[hp_id] = materialized_obj
         return hp_id, materialized_obj
 
-    def report(self, hp_id, performance):
+    def report(self, hp_id, performance, metadata=None):
         # The idea is that the manager can do things with this history. Since we will probably not have a lot of
         # samples, just having a flat structure works for now. The argument is that if you need to do smart HP
         # optimization, the cost of producing a sample is high, and you will be in a data limited regime. Having to
         # iterate over a list will be a small cost compared to evaluating each sample.
-        self.history[hp_id].append(performance)
+        self.history[hp_id].append((performance, metadata))
 
     def best_hyper_params(self):
         best_performance = None
-        best_args = None
-        best_kwargs = None
+        best_param = None
+        best_metadata = None
         for hp_id, performances in self.history.items():
-            for performance in performances:
+            for performance, metadata in performances:
                 if best_performance is None or performance.cmp(best_performance):
                     best_performance = performance
-                    best_args, best_kwargs = self.hyper_parameters[hp_id]
-        return best_args, best_kwargs
+                    best_params = self.hyper_parameters[hp_id]
+                    best_metadata = metadata
+        return best_params, metadata
 
     def get_any_hyper_params(self):
         return self.get_hyper_parameters()
@@ -227,17 +183,20 @@ class ObjectHyperParameterManager(object):
         #TODO: This assumes random sampling for the moment
         return self.get_hyper_parameters()
 
+    def __iter__(self):
+        if self.search_method == 'random':
+            for i in range(self.n):
+                yield self.get_hyper_parameters()
+
+    def len(self):
+        if self.search_method == 'random':
+            return self.n
 
 
 class HyperParameterTrainer(object):
-    def __init__(self, *, base_model, base_args, base_kwargs,
-                 search_method='random'):
-        self.base_model = base_model
-        self.base_args = base_args
-        self.base_kwargs = base_kwargs
-        self.hp_manager = HyperParameterManager(base_args, base_kwargs,
-                                                search_method=search_method)
-        self.search_method = search_method
+    def __init__(self, *, setting_interpreter: Callable[[Any], TrainingArguments], hp_manager: HyperParameterManager):
+        self.hp_manager = hp_manager
+        self.settings_interpreter = setting_interpreter
 
     def __enter__(self):
         return self
@@ -245,25 +204,27 @@ class HyperParameterTrainer(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 
-    def train(self, n, **train_kwargs):
-        try:
-            for i in trange(n, desc='Hyper parameter'):
-                    hp_id, args, kwargs = self.hp_manager.get_hyper_parameters()
-                    model = self.base_model(*args, **kwargs)
-                    performance, best_model_path = train(model=model,
-                                                         **train_kwargs)
-                    self.hp_manager.report(hp_id, performance)
-        except StopIteration:
-            return self.hp_manager.best_hyper_params()
+    def train(self):
+        for hp_id, settings in tqdm(self.hp_manager, 'Hyper parameters'):
+            # We need to use the settings to prepare model, dataset and training arguments
+            prepared_settings = self.settings_interpreter(settings)
+            performance, best_model_path = train(training_args=prepared_settings)
+            self.hp_manager.report(hp_id, performance, dict(best_model_path=best_model_path))
 
     def get_best_hyper_params(self):
-        return self.hp_manager.best_hyper_params()
+        best_params, metadata = self.hp_manager.best_hyper_params()
+        return best_params
 
     def get_any_hyper_params(self):
         return self.hp_manager.get_any_hyper_params()
 
-    def get_next(self):
-        pass
+    def best_model(self):
+        best_params, metadata = self.hp_manager.best_hyper_params()
+        return metadata['best_model_path']
+
+    def best_hyper_params(self):
+        best_params, metadata = self.hp_manager.best_hyper_params()
+        return best_params
 
 
 def add_parser_args(parser):
