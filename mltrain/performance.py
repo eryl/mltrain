@@ -51,8 +51,8 @@ class Performance(object):
 
 class PerformanceCollection(object):
     def __init__(self, performances):
-        self.metrics = [p.metric for p in performances] # Keeps the order of the performance objects
-        self.performances = { p.metric:p for p in performances}
+        self.metrics = [p.metric for p in performances]  # Keeps the order of the performance objects
+        self.performances = {p.metric: p for p in performances}
 
     def cmp(self, other):
         for metric in self.metrics:
@@ -62,10 +62,10 @@ class PerformanceCollection(object):
                 # This performance is better than the other
                 return True
             elif other_performance.cmp(performance):
-                # This performance is equal to the other, we need to look at the next metric
+                # This performance is worse than the other
                 return False
             else:
-                # This performance is worse than the other
+                # This performance is equal to the other, we need to look at the next metric
                 continue
         return True  # If two performance collections are exactly the same, we return this one as the better
 

@@ -12,6 +12,44 @@ from tqdm import trange, tqdm
 import numpy as np
 
 
+class HyperParameterPointer(object):
+    def __init__(self, hp_obj):
+        self.hp_obj = hp_obj
+
+
+def gather_hyper_prams(obj, hp_list):
+    """Make any HyperParameter a concrete object"""
+    non_collection_types = (str, bytes, bytearray, np.ndarray)
+    try:
+        if isinstance(obj, HyperParameter):
+            new_hp_list = []  # If this is a hyper parameter, we create a nested hp_list. This makes the below cases add
+                          # nested hyper parameters to the inner list
+            ptr = HyperParameterPointer(obj)
+            hp_list.append((ptr, new_hp_list))
+            # for now, the only hyper parameter which can have children is the discrete one, so we should check
+            # children of that
+            if isinstance(obj, DiscreteHyperParameter):
+                obj.values = [gather_hyper_prams(v, new_hp_list) for v in obj.values]
+            return ptr
+
+        elif isinstance(obj, Mapping):
+            return type(obj)({k: gather_hyper_prams(v, hp_list) for k,v in obj.items()})
+        elif isinstance(obj, Collection) and not isinstance(obj, non_collection_types):
+            return type(obj)([gather_hyper_prams(v, hp_list) for v in obj])
+        elif hasattr(obj, '__dict__'):
+            try:
+                obj_copy = copy.copy(obj)
+                obj_copy.__dict__ = gather_hyper_prams(obj.__dict__, hp_list)
+                return obj_copy
+            except TypeError:
+                return obj
+        else:
+            return obj
+    except TypeError as e:
+        raise MaterializeError(obj, "Failed to materialize") from e
+
+
+
 class HyperParameter(object):
     def __repr__(self):
         raise NotImplementedError()
@@ -100,7 +138,7 @@ class HyperParameterManager(object):
         if rng is None:
             rng = np.random.RandomState()
         self.rng = rng
-        self.base_obj = base_obj
+        self.base_obj = copy.deepcopy(base_obj)
         self.search_method = search_method
         if search_method == 'random' and n is None:
             raise ValueError("When random search is specified, number of iterations must be set")
@@ -112,6 +150,7 @@ class HyperParameterManager(object):
         self.setup_search_space()
 
     def setup_search_space(self):
+        # We need to be able to take an arbitrary python object and break it down into all its parts. We first make
         # for i, arg in enumerate(self.base_args):
         #     if isinstance(arg, HyperParameter):
         #         self.search_space.append((arg, 'args', i))
@@ -172,9 +211,9 @@ class HyperParameterManager(object):
             for performance, metadata in performances:
                 if best_performance is None or performance.cmp(best_performance):
                     best_performance = performance
-                    best_params = self.hyper_parameters[hp_id]
+                    best_param = self.hyper_parameters[hp_id]
                     best_metadata = metadata
-        return best_params, metadata
+        return best_param, best_metadata
 
     def get_any_hyper_params(self):
         return self.get_hyper_parameters()
