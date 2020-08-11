@@ -49,7 +49,7 @@ class Monitor(object):
 
 
 class MonitorProcess(multiprocessing.Process):
-    def __init__(self, store_directory, command_queue, *args, buffer_size=100, save_interval=None, compress_log=False, **kwargs):
+    def __init__(self, store_directory, command_queue, *args, buffer_size=10, save_interval=10, compress_log=False, **kwargs):
         super(MonitorProcess, self).__init__(*args, **kwargs)
         self.store_directory = store_directory
         if not os.path.exists(store_directory):
