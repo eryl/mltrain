@@ -11,12 +11,16 @@ import pickle
 from collections import defaultdict
 from pathlib import Path
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, Any, Iterable, Dict
-from dataclasses import is_dataclass
+from dataclasses import dataclass, is_dataclass
+from typing import Optional, Any, Iterable, Dict, List, Union, Collection
+try:  # Literal might not be supported in python versions earlier than 3.7
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
 
-from mltrain.performance import setup_metrics
+from mltrain.performance import setup_metrics, EvaluationMetric
 from mltrain.monitor import Monitor
+from mltrain.util import load_config
 
 from tqdm import trange, tqdm
 import numpy as np
@@ -24,24 +28,38 @@ import numpy as np
 
 class BaseModel(ABC):
     @abstractmethod
-    def fit(self, batch):
+    def get_metadata(self) -> Dict:
         pass
 
     @abstractmethod
-    def get_metadata(self):
+    def evaluation_metrics(self) -> List[EvaluationMetric]:
         pass
 
     @abstractmethod
-    def evaluation_metrics(self):
+    def save(self, save_path) -> Union[str, Path]:
+        pass
+
+
+class MinibatchModel(BaseModel):
+    @abstractmethod
+    def fit_batch(self, batch) -> Dict:
         pass
 
     @abstractmethod
-    def evaluate(self, batch):
+    def evaluate_batch(self, batch) -> Dict:
+        pass
+
+
+class FullbatchModel(BaseModel):
+    @abstractmethod
+    def fit_dataset(self, batch) -> Dict:
         pass
 
     @abstractmethod
-    def save(self, save_path):
+    def evaluate_dataset(self, batch) -> Dict:
         pass
+
+
 
 
 class JSONEncoder(json.JSONEncoder):
@@ -126,17 +144,30 @@ def run_experiment(*, hyper_parameters=None, model_factory=None, **kwargs):
 
 @dataclass
 class TrainingConfig(object):
+    """ Configuration dataclass for the mltrain.train.train function.
+
+    Args:
+        max_epochs (int): Train for at most this number of epochs
+        keep_snapshots (bool): If True, keep all checkpoints from training. If False, only the best and the lates
+                               checkpoints are saved.
+        eval_time (int): Run the evaluation loop and checkpointing after this number of seconds has passed
+        eval_iterations (int): Run the evaluation loop after these many training iterations (batches)
+        eval_epochs (int): Run the evaluation loop after these many epochs have passed.
+        model_format_string (str): Use this format string for saving model checkpoint files.
+        do_pre_eval (bool): Run the evaluation loop before training starts.
+    """
     max_epochs: int = 1
-    keep_snapshots: bool = False
+    keep_snapshots: Union[Literal['all', 'none', 'best'], bool] = 'none'
     eval_time: Optional[int] = None
     eval_iterations: Optional[int] = None
     eval_epochs: int = 1
     model_format_string: Optional[str] = None
     do_pre_eval: bool = False
 
+
 @dataclass
 class TrainingArguments(object):
-    model: BaseModel
+    model: Union[BaseModel, FullbatchModel, MinibatchModel]
     output_dir: Path
     training_dataset: Iterable
     evaluation_dataset: Iterable
@@ -194,8 +225,10 @@ def setup_training(
     setup_directory(output_dir)
 
     if artifacts is not None:
+        artifacts_dir = output_dir / 'artifacts'
+        artifacts_dir.mkdir()
         for k, v in artifacts.items():
-            with open(output_dir / k, 'wb') as fp:
+            with open(artifacts_dir / (k + '.pkl'), 'wb') as fp:
                 pickle.dump(v, fp)
     if metadata is None:
         metadata = dict()
@@ -233,7 +266,7 @@ def training_loop(
     best_model_path = None
 
     def sigint_handler(signal, frame):
-        checkpoint(model, model_checkpoint_format, np.nan, {}, is_best=False, remove_models=False)
+        checkpoint(model, model_checkpoint_format, np.nan, {}, is_best=False, keep_snapshots='all')
         sys.exit(0)
     signal.signal(signal.SIGINT, sigint_handler)
 
@@ -246,7 +279,7 @@ def training_loop(
                            monitor=monitor,
                            keep_snapshots=training_config.keep_snapshots)
         if training_config.do_pre_eval:
-            best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
+            best_performance, best_model_path = evaluate_model(best_performance=best_performance, epoch=0, **eval_kwargs)
 
         # These variables will be used to control when to do evaluation
         eval_timestamp = time.time()
@@ -255,35 +288,42 @@ def training_loop(
         needs_final_eval = True
 
         for epoch in trange(training_config.max_epochs, desc='Epochs'):
-            ## This is the main training loop
-            for i, batch in enumerate(tqdm(training_dataset, desc='Training batch')):
-                needs_final_eval = True
-                epoch_fraction = epoch + i / len(training_dataset)
-                training_results = model.fit(batch)
-                monitor.log_one_now('epoch', epoch_fraction)
-                if training_results is not None:
-                    monitor.log_now(training_results)
+            if hasattr(model, 'fit_dataset'):
+                model.fit_dataset(training_dataset)
+            elif hasattr(model, 'fit_batch') or hasattr(model, 'fit'):
+                ## This is the main training loop
+                for i, batch in enumerate(tqdm(training_dataset, desc='Training batch')):
+                    needs_final_eval = True
+                    epoch_fraction = epoch + i / len(training_dataset)
+                    if hasattr(model, 'fit_batch'):
+                        training_results = model.fit_batch(batch)
+                    elif hasattr(model, 'fit'):
+                        print("Model has 'fit' attribute, we treat it as fit_batch")
+                        training_results = model.fit(batch)
+                    monitor.log_one_now('epoch', epoch_fraction)
+                    if training_results is not None:
+                        monitor.log_now(training_results)
 
-                # eval_time and eval_iterations allow the user to control how often to run evaluations
-                eval_time_dt = time.time() - eval_timestamp
-                eval_iteration += 1
+                    # eval_time and eval_iterations allow the user to control how often to run evaluations
+                    eval_time_dt = time.time() - eval_timestamp
+                    eval_iteration += 1
 
-                if (
-                        (training_config.eval_time is not None
-                         and training_config.eval_time > 0
-                         and eval_time_dt >= training_config.eval_time)
-                        or
-                        (training_config.eval_iterations is not None
-                         and training_config.eval_iterations > 0
-                         and eval_iteration >= training_config.eval_iterations)
-                ):
-                    best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
-                    eval_timestamp = time.time()
-                    eval_iteration = 0
-                    needs_final_eval = False
+                    if (
+                            (training_config.eval_time is not None
+                             and training_config.eval_time > 0
+                             and eval_time_dt >= training_config.eval_time)
+                            or
+                            (training_config.eval_iterations is not None
+                             and training_config.eval_iterations > 0
+                             and eval_iteration >= training_config.eval_iterations)
+                    ):
+                        best_performance, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch_fraction, **eval_kwargs)
+                        eval_timestamp = time.time()
+                        eval_iteration = 0
+                        needs_final_eval = False
 
-                monitor.tick()
-                # End of training loop
+                    monitor.tick()
+                    # End of training loop
 
             eval_epoch += 1
             if (
@@ -291,7 +331,7 @@ def training_loop(
                     and training_config.eval_epochs > 0
                     and eval_epoch >= training_config.eval_epochs
             ):
-                best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
+                best_performance, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
                 eval_epoch = 0
                 needs_final_eval = False
             # End of epoch
@@ -299,8 +339,8 @@ def training_loop(
     # Done with the whole training loop. If we ran the evaluate_model at the end of the last epoch, we shouldn't do
     # it again
     if needs_final_eval:
-        best_metrics, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
-    return best_metrics, best_model_path
+        best_performance, best_model_path = evaluate_model(best_performance=best_performance, epoch=epoch, **eval_kwargs)
+    return best_performance, best_model_path
 
 
 def evaluate_model(*,
@@ -311,26 +351,35 @@ def evaluate_model(*,
                    epoch,
                    monitor=None,
                    keep_snapshots=False):
-    gathered_evaluation_results = defaultdict(list)
-    for batch in evaluation_dataset:
-        for k, v in model.evaluate(batch).items():
-            gathered_evaluation_results[k].append(v)
     evaluation_results = {}
-    for k, v in gathered_evaluation_results.items():
-        if v:
-            try:
-                evaluation_results[k] = np.mean(v)
-            except TypeError:
-                print("Not logging result {}, can't aggregate data type".format(k))
-    new_performance = best_performance.update(evaluation_results)
 
+    if hasattr(model, 'evaluate_dataset'):
+        evaluation_results.update(model.evaluate_dataset(evaluation_dataset))
+    elif hasattr(model, 'evaluate_batch') or hasattr(model, 'evaluate'):
+        gathered_evaluation_results = defaultdict(list)
+        for batch in tqdm(evaluation_dataset, desc='Validation batch'):
+            if hasattr(model, 'evaluate_batch'):
+                batch_eval_results = model.evaluate_batch(batch)
+            elif hasattr(model, 'evaluate'):
+                print("Model has 'evaluate' method, we treat it as 'evaluate_batch'")
+                batch_eval_results = model.evaluate(batch)
+            for k, v in batch_eval_results.items():
+                gathered_evaluation_results[k].append(v)
+        for k, v in gathered_evaluation_results.items():
+            if v:
+                try:
+                    evaluation_results[k] = np.mean(v)
+                except TypeError:
+                    print("Not logging result {}, can't aggregate data type".format(k))
+
+    new_performance = best_performance.update(evaluation_results)
     is_best = new_performance.cmp(best_performance)
 
     if monitor is not None:
         monitor.log_now({k: v for k,v in evaluation_results.items()})
 
     best_model_path = checkpoint(model, model_checkpoint_format, epoch,
-                                 new_performance, is_best, remove_models=not keep_snapshots)
+                                 new_performance, is_best, keep_snapshots=keep_snapshots)
     if is_best:
         best_performance = new_performance
         if monitor is not None:
@@ -360,8 +409,15 @@ def checkpoint(model,
                checkpoint_format: Path,
                epoch,
                performances,
-               is_best, latest_model_name='latest_model', best_model_name='best_model',
-               remove_models=True):
+               is_best,
+               latest_model_name='latest_model',
+               best_model_name='best_model',
+               keep_snapshots: Union[Literal['all', 'none', 'best'], bool] = False):
+    if isinstance(keep_snapshots, bool):
+        if keep_snapshots:
+            keep_snapshots = 'all'
+        else:
+            keep_snapshots = 'none'
     model_directory = checkpoint_format.parent.resolve(strict=False)
     model_name = checkpoint_format.name.format(epoch=epoch, metrics=performances)
     checkpoint_path = checkpoint_format.with_name(model_name).resolve()
@@ -370,7 +426,7 @@ def checkpoint(model,
     latest_model_symlink = model_directory / latest_model_name
     best_model_symlink = model_directory / best_model_name
 
-    if remove_models and latest_model_symlink.exists():
+    if keep_snapshots != 'all' and latest_model_symlink.exists():
         latest_model = latest_model_symlink.resolve(strict=True)
         if not best_model_symlink.exists() or latest_model != best_model_symlink.resolve(strict=True):
             latest_model.unlink()
@@ -387,7 +443,7 @@ def checkpoint(model,
         # will only return true if it exists, if either returns True, than the file exists and we should remove it
         # whether it's a symlink or not
         if best_model_symlink.exists():
-            if remove_models:
+            if keep_snapshots == 'none':
                 # The previous best model can't also be the latest model since we take care of that above, so it's safe
                 # to remove
                 previous_best_model = best_model_symlink.resolve(strict=True)
@@ -396,10 +452,11 @@ def checkpoint(model,
             best_model_symlink.unlink()
         relative_checkpoint = checkpoint_path.relative_to(best_model_symlink.absolute().parent)
         best_model_symlink.symlink_to(relative_checkpoint)
-
     return best_model_symlink.resolve()
 
 
+def setup_training_config(config_path):
+    return load_config(config_path, TrainingConfig)
 
 
 def add_parser_args(parser):
