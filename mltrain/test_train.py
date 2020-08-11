@@ -6,7 +6,7 @@ from typing import Dict, Any, Tuple
 import numpy as np
 import time
 
-from mltrain.train import Monitor, train, HyperParameterManager, HyperParameterTrainer, DiscreteHyperParameter, ObjectHyperParameterManager, materialize_hyper_parameters
+from mltrain.train import Monitor, train
 
 
 class DummyModel(object):
@@ -90,16 +90,3 @@ class TestModel(object):
 
     def __repr__(self):
         return str(self)
-
-class TestHyperParameterMaterialization(unittest.TestCase):
-    def test_materialize_hyper_parameters(self):
-        base_args = ('foo', 2, ('a', 'b', 'c'), DiscreteHyperParameter([3, 5]))
-        base_kwargs = {'baz': 'bar', 'asdf': DiscreteHyperParameter([True, False])}
-
-        for i in range(5):
-            print(materialize_hyper_parameters(dict(base_args=base_args,
-                                                    base_kwargs=base_kwargs)))
-
-        hp_obj = HyperParameterTest(base_args=base_args, base_kwargs=base_kwargs, extra=TestModel())
-        for i in range(10):
-            print(materialize_hyper_parameters(hp_obj))
