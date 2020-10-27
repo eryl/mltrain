@@ -2,6 +2,8 @@ import time
 import os
 import os.path
 import multiprocessing
+from numbers import Number
+from collections.abc import Mapping, Sequence
 #import multiprocessing.dummy as multiprocessing
 import queue
 import gzip
@@ -108,7 +110,17 @@ class MonitorProcess(multiprocessing.Process):
                 self.channel_files[channel_name] = channel_file
             else:
                 channel_file = self.channel_files[channel_name]
-            data = ''.join(['{} {}\n'.format(time, value) for time, value in self.channels[channel_name]])
+            # Handle values as numbers
+            data_lines = []
+            for time, value in self.channels[channel_name]:
+                if isinstance(value, Mapping):
+                    val_string = ' '.join(str(v) for v in value.values())
+                elif isinstance(value, Sequence):
+                    val_string = ' '.join(str(v) for v in value)
+                else:
+                    val_string = str(value)
+                data_lines.append(f'{time} {val_string}\n')
+            data = ''.join(data_lines)
             channel_file.write(data)
             channel_file.flush()
             self.channels[channel_name].clear()
