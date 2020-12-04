@@ -8,6 +8,7 @@ import os.path
 import multiprocessing
 import signal
 import pickle
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from abc import ABC, abstractmethod
@@ -174,6 +175,7 @@ class TrainingArguments(object):
     training_config: TrainingConfig
     metadata: Optional[Dict] = None
     artifacts: Optional[Dict] = None
+    files: Optional[List[Path]] = None
 
 
 def train(
@@ -190,7 +192,7 @@ def train(
                                                                        metadata=metadata,
                                                                        artifacts=training_args.artifacts,
                                                                        output_dir=output_dir,
-                                                                       )
+                                                                       files=training_args.files,)
     try:
             best_performance, best_model_path = training_loop(model=model,
                                                               training_dataset=training_dataset,
@@ -208,8 +210,9 @@ def train(
 def setup_training(
         *,
         model,
-        training_config,
+        training_config: TrainingConfig,
         output_dir,
+        files=None,
         artifacts=None,
         metadata=None):
 
@@ -230,6 +233,13 @@ def setup_training(
         for k, v in artifacts.items():
             with open(artifacts_dir / (k + '.pkl'), 'wb') as fp:
                 pickle.dump(v, fp)
+
+    if files is not None:
+        dst_dir = output_dir / 'files'
+        dst_dir.mkdir()
+        for file in files:
+            shutil.copy(file, dst_dir)
+
     if metadata is None:
         metadata = dict()
     try:
