@@ -209,7 +209,7 @@ def plot_online(files, xscale, yscale, xlim, ylim):
 
         return [fm.line for fm in fmonitors]
 
-    ani = animation.FuncAnimation(fig, animate, init_func=init, interval=10, blit=False, save_count=50)
+    ani = animation.FuncAnimation(fig, animate, init_func=init, interval=10, blit=False)
 
     plt.show()
 
