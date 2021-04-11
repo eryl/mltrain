@@ -19,9 +19,9 @@ try:  # Literal might not be supported in python versions earlier than 3.7
 except ImportError:
     from typing_extensions import Literal
 
-from mltrain.performance import setup_metrics, EvaluationMetric
-from mltrain.monitor import Monitor
-from mltrain.util import load_config
+from .performance import setup_metrics, EvaluationMetric
+from .monitor import Monitor
+from .util import load_config
 
 from tqdm import trange, tqdm
 import numpy as np
