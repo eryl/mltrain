@@ -8,7 +8,12 @@ class EvaluationMetric(object):
         return hash(self.name)
 
     def __eq__(self, other):
-        return self.name == other.name
+        if isinstance(other, EvaluationMetric):
+            return self.name == other.name
+        elif isinstance(other, str):
+            return self.name == other
+        else:
+            raise NotImplementedError(f"Equality with {other.__class__} has not been implemented")
 
     def __str__(self):
         return self.name
@@ -90,6 +95,10 @@ class PerformanceCollection(object):
 
     def items(self):
         yield from self.performances.items()
+
+    def __getitem__(self, metric):
+        return self.performances[metric]
+
 
 def setup_metrics(evaluation_metrics):
     base_performances = []
