@@ -6,7 +6,7 @@ from pathlib import Path
 from collections.abc import Collection, Mapping
 from typing import Callable, Any
 
-from mltrain.train import train, TrainingConfig, TrainingArguments
+from .train import train, TrainingConfig, TrainingArguments
 
 from tqdm import trange, tqdm
 import numpy as np
