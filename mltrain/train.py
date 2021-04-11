@@ -439,7 +439,10 @@ def checkpoint(model,
     if keep_snapshots != 'all' and latest_model_symlink.exists():
         latest_model = latest_model_symlink.resolve(strict=True)
         if not best_model_symlink.exists() or latest_model != best_model_symlink.resolve(strict=True):
-            latest_model.unlink()
+            if latest_model.is_dir():
+                shutil.rmtree(latest_model)
+            else:
+                latest_model.unlink()
 
     if os.path.lexists(latest_model_symlink):
         latest_model_symlink.unlink()
@@ -457,7 +460,10 @@ def checkpoint(model,
                 # The previous best model can't also be the latest model since we take care of that above, so it's safe
                 # to remove
                 previous_best_model = best_model_symlink.resolve(strict=True)
-                previous_best_model.unlink()
+                if previous_best_model.is_dir():
+                    shutil.rmtree(previous_best_model)
+                else:
+                    previous_best_model.unlink()
         if best_model_symlink.is_symlink():
             best_model_symlink.unlink()
         relative_checkpoint = checkpoint_path.relative_to(best_model_symlink.absolute().parent)
